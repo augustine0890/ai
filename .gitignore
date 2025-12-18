@@ -63,3 +63,6 @@ dmypy.json
 # Local development
 *.log
 local_settings.py
+
+# Data
+data
