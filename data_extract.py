@@ -162,7 +162,8 @@ def search_google_serper(query, num_results=3, location=None, language=None):
 
 def build_search_queries(company_name, pic_name=None, roo_name=None):
     """
-    Build multiple search queries with different strategies for better results.
+    Build multiple search queries with AI/tech-focused keywords.
+    Prioritizes queries that target relevant industry websites.
     Works globally with any language.
     Optionally includes PIC (Person In Charge) and ROO for more specific searches.
 
@@ -175,26 +176,48 @@ def build_search_queries(company_name, pic_name=None, roo_name=None):
     """
     queries = []
 
-    # Priority 1: Company name with context (most specific)
-    queries.append(f"{company_name} official website")
-    queries.append(f"{company_name} company")
+    # Priority 1: Official website with AI/tech context
+    queries.append(f"{company_name} AI technology official website")
+    queries.append(f"{company_name} artificial intelligence company")
 
-    # Priority 2: Add PIC if available (helps disambiguate)
+    # Priority 2: Specific AI/tech industry keywords
+    queries.append(f"{company_name} robotics automation AI")
+    queries.append(f"{company_name} machine learning AI platform")
+    queries.append(f"{company_name} computer vision AI")
+
+    # Priority 3: Add PIC with AI context if available
     if pic_name:
-        queries.append(f"{company_name} {pic_name}")
-        queries.append(f"{company_name} {pic_name} official website")
+        queries.append(f"{company_name} {pic_name} AI technology")
+        queries.append(f"{company_name} {pic_name} robotics")
 
-    # Priority 3: Add ROO if available
+    # Priority 4: Manufacturing and industrial AI keywords
+    queries.append(f"{company_name} smart factory AI manufacturing")
+    queries.append(f"{company_name} industrial automation robotics")
+
+    # Priority 5: Specific technology domains
+    queries.append(f"{company_name} vision AI image recognition")
+    queries.append(f"{company_name} autonomous vehicle self-driving")
+    queries.append(f"{company_name} AGV AMR robotics")
+
+    # Priority 6: Add ROO with tech context if available
     if roo_name:
-        queries.append(f"{company_name} {roo_name}")
+        queries.append(f"{company_name} {roo_name} AI technology")
 
-    # Priority 4: Company with AI keywords
-    queries.append(f"{company_name} AI company")
-    queries.append(f"{company_name} artificial intelligence")
-    queries.append(f"{company_name} robotics")
-    queries.append(f"{company_name} automation")
+    # Priority 7: General tech and software keywords
+    queries.append(f"{company_name} AI software platform")
+    queries.append(f"{company_name} deep learning neural network")
+    queries.append(f"{company_name} AI chip semiconductor")
 
-    # Priority 5: Simple search as fallback
+    # Priority 8: Healthcare, service, logistics AI
+    queries.append(f"{company_name} healthcare AI medical")
+    queries.append(f"{company_name} logistics AI optimization")
+    queries.append(f"{company_name} chatbot AI service")
+
+    # Priority 9: Standard searches (broader fallback)
+    queries.append(f"{company_name} official website")
+    queries.append(f"{company_name} company technology")
+
+    # Priority 10: Simple company name (last resort)
     queries.append(f"{company_name}")
 
     return queries
@@ -720,13 +743,13 @@ if __name__ == "__main__":
 
     # FAST MODE (Recommended for large datasets like 1800 rows)
     # Estimated: ~2-3 hours for 1800 rows
-    main(
-        max_queries=2,           # Try only 2 search queries
-        max_urls_per_query=1,    # Check only top result per query
-        min_confidence=0.65,     # Accept slightly lower confidence
-        rate_limit=0.3,          # Faster rate limit
-        save_interval=20         # Save less frequently
-    )
+    # main(
+    #     max_queries=2,           # Try only 2 search queries
+    #     max_urls_per_query=1,    # Check only top result per query
+    #     min_confidence=0.65,     # Accept slightly lower confidence
+    #     rate_limit=0.3,          # Faster rate limit
+    #     save_interval=20         # Save less frequently
+    # )
 
     # BALANCED MODE (Default - good quality/speed tradeoff)
     # Estimated: ~3-4 hours for 1800 rows
@@ -751,7 +774,7 @@ if __name__ == "__main__":
     # ========== COMMON USE CASES ==========
 
     # Test first 10 rows with FAST mode
-    # main(start_row=0, end_row=10, max_queries=2, max_urls_per_query=1, rate_limit=0.2)
+    main(start_row=705, end_row=1763, max_queries=2, max_urls_per_query=1, rate_limit=0.2)
 
     # Process specific range (e.g., rows 100-200)
     # main(start_row=100, end_row=200)
