@@ -291,10 +291,11 @@ main(
 
 ### Error Handling
 - Graceful handling of network errors
-- Website scraping failures marked as "Scrape Failed"
-- Invalid searches marked as "Not Found"
+- Failed searches or irrelevant websites marked as "Not Found"
+- Processing errors marked as "Error"
 - Keyboard interrupt (Ctrl+C) safe - saves progress before exit
 - Emergency saves on fatal errors
+- Automatic checkpointing prevents data loss
 
 ### Technical Implementation Details
 
