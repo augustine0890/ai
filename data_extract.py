@@ -5,6 +5,7 @@ import time
 import json
 import os
 import logging
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
@@ -12,27 +13,34 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from functools import lru_cache
+from typing import Optional, Dict, List, Any
+from collections import OrderedDict
 
 # Load environment variables from .env file
 load_dotenv()
 
 # ================= CONFIGURATION =================
-INPUT_FILE = 'data/companies.xlsx'  # Input file from data folder
-OUTPUT_FILE = 'data/companies_enriched.xlsx'  # Output file to data folder
-PROGRESS_FILE = 'data/progress_checkpoint.json'  # Progress tracking file
-LOG_DIR = 'logs'  # Log directory
+INPUT_FILE = "data/companies.xlsx"  # Input file from data folder
+OUTPUT_FILE = "data/companies_enriched.xlsx"  # Output file to data folder
+PROGRESS_FILE = "data/progress_checkpoint.json"  # Progress tracking file
+CACHE_FILE = "data/cache.json"  # Persistent cache file
+LOG_DIR = "logs"  # Log directory
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Validate API keys
 if not SERPER_API_KEY or not GEMINI_API_KEY:
-    raise ValueError("API keys not found. Please create a .env file with SERPER_API_KEY and GEMINI_API_KEY")
+    raise ValueError(
+        "API keys not found. Please create a .env file with SERPER_API_KEY and GEMINI_API_KEY"
+    )
 
 # Initialize Gemini Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # ================= LOGGING & PROGRESS TRACKING =================
+
 
 def setup_logging():
     """
@@ -43,17 +51,17 @@ def setup_logging():
     Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 
     # Create log filename with timestamp
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = Path(LOG_DIR) / f'data_extract_{timestamp}.log'
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = Path(LOG_DIR) / f"data_extract_{timestamp}.log"
 
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
+        format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler()  # Also print to console
-        ]
+            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.StreamHandler(),  # Also print to console
+        ],
     )
 
     logger = logging.getLogger(__name__)
@@ -66,16 +74,16 @@ def save_checkpoint(processed_rows, total_rows, last_row_index):
     Save progress checkpoint to resume later if needed.
     """
     checkpoint = {
-        'timestamp': datetime.now().isoformat(),
-        'processed_rows': processed_rows,
-        'total_rows': total_rows,
-        'last_row_index': last_row_index
+        "timestamp": datetime.now().isoformat(),
+        "processed_rows": processed_rows,
+        "total_rows": total_rows,
+        "last_row_index": last_row_index,
     }
 
     # Ensure data directory exists
-    Path('data').mkdir(parents=True, exist_ok=True)
+    Path("data").mkdir(parents=True, exist_ok=True)
 
-    with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(checkpoint, f, indent=2)
 
 
@@ -86,7 +94,7 @@ def load_checkpoint():
     """
     if os.path.exists(PROGRESS_FILE):
         try:
-            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+            with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
                 checkpoint = json.load(f)
                 return checkpoint
         except Exception as e:
@@ -103,27 +111,422 @@ def clear_checkpoint():
         logging.info("Checkpoint cleared")
 
 
+# ================= CACHING SYSTEM =================
+
+
+class CacheStats:
+    """Track cache hit/miss statistics for performance monitoring."""
+
+    def __init__(self):
+        self.search_hits = 0
+        self.search_misses = 0
+        self.scrape_hits = 0
+        self.scrape_misses = 0
+        self.verification_hits = 0
+        self.verification_misses = 0
+        self.extraction_hits = 0
+        self.extraction_misses = 0
+
+    def record_search_hit(self):
+        self.search_hits += 1
+
+    def record_search_miss(self):
+        self.search_misses += 1
+
+    def record_scrape_hit(self):
+        self.scrape_hits += 1
+
+    def record_scrape_miss(self):
+        self.scrape_misses += 1
+
+    def record_verification_hit(self):
+        self.verification_hits += 1
+
+    def record_verification_miss(self):
+        self.verification_misses += 1
+
+    def record_extraction_hit(self):
+        self.extraction_hits += 1
+
+    def record_extraction_miss(self):
+        self.extraction_misses += 1
+
+    def get_search_hit_rate(self) -> float:
+        total = self.search_hits + self.search_misses
+        return (self.search_hits / total * 100) if total > 0 else 0.0
+
+    def get_scrape_hit_rate(self) -> float:
+        total = self.scrape_hits + self.scrape_misses
+        return (self.scrape_hits / total * 100) if total > 0 else 0.0
+
+    def get_verification_hit_rate(self) -> float:
+        total = self.verification_hits + self.verification_misses
+        return (self.verification_hits / total * 100) if total > 0 else 0.0
+
+    def get_extraction_hit_rate(self) -> float:
+        total = self.extraction_hits + self.extraction_misses
+        return (self.extraction_hits / total * 100) if total > 0 else 0.0
+
+    def get_total_api_calls_saved(self) -> int:
+        """Calculate how many API calls were saved by caching."""
+        return self.search_hits + self.verification_hits + self.extraction_hits
+
+    def print_stats(self, logger):
+        """Print cache statistics to logger."""
+        logger.info("=" * 60)
+        logger.info("CACHE PERFORMANCE STATISTICS")
+        logger.info("=" * 60)
+        logger.info(
+            f"Search Cache:        {self.search_hits:4d} hits, {self.search_misses:4d} misses ({self.get_search_hit_rate():.1f}% hit rate)"
+        )
+        logger.info(
+            f"Scrape Cache:        {self.scrape_hits:4d} hits, {self.scrape_misses:4d} misses ({self.get_scrape_hit_rate():.1f}% hit rate)"
+        )
+        logger.info(
+            f"Verification Cache:  {self.verification_hits:4d} hits, {self.verification_misses:4d} misses ({self.get_verification_hit_rate():.1f}% hit rate)"
+        )
+        logger.info(
+            f"Extraction Cache:    {self.extraction_hits:4d} hits, {self.extraction_misses:4d} misses ({self.get_extraction_hit_rate():.1f}% hit rate)"
+        )
+        logger.info(f"Total API calls saved: {self.get_total_api_calls_saved()}")
+        logger.info("=" * 60)
+
+
+class LRUCache:
+    """
+    LRU (Least Recently Used) cache with optional size limit.
+    Prevents memory issues with large datasets by evicting old entries.
+    """
+
+    def __init__(self, max_size: int = 1000):
+        self.cache: OrderedDict = OrderedDict()
+        self.max_size = max_size
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get item from cache, mark as recently used."""
+        if key not in self.cache:
+            return None
+        # Move to end (most recently used)
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def set(self, key: str, value: Any):
+        """Set item in cache, evict oldest if needed."""
+        if key in self.cache:
+            # Update existing key, move to end
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+
+        # Evict oldest if over size limit
+        if len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)  # Remove oldest (first) item
+
+    def clear(self):
+        """Clear all cache entries."""
+        self.cache.clear()
+
+    def size(self) -> int:
+        """Return current cache size."""
+        return len(self.cache)
+
+
+class DataCache:
+    """
+    Main caching system for search results, web scraping, and AI extractions.
+    Supports both in-memory and optional persistent disk caching.
+    """
+
+    def __init__(
+        self,
+        enable_disk_cache: bool = False,
+        cache_file: str = CACHE_FILE,
+        max_memory_size: int = 1000,
+    ):
+        """
+        Initialize the cache system.
+
+        Args:
+            enable_disk_cache: Whether to persist cache to disk
+            cache_file: Path to cache file for persistent storage
+            max_memory_size: Maximum number of entries in memory cache (LRU eviction)
+        """
+        self.enable_disk_cache = enable_disk_cache
+        self.cache_file = cache_file
+        self.stats = CacheStats()
+
+        # Separate LRU caches for different data types
+        self.search_cache = LRUCache(max_size=max_memory_size)
+        self.scrape_cache = LRUCache(max_size=max_memory_size)
+        self.verification_cache = LRUCache(
+            max_size=max_memory_size // 2
+        )  # Smaller, less likely to reuse
+        self.extraction_cache = LRUCache(max_size=max_memory_size // 2)
+
+        # Load persistent cache if enabled
+        if self.enable_disk_cache:
+            self._load_from_disk()
+
+    @staticmethod
+    def _hash_key(*args) -> str:
+        """Create a hash key from arguments for cache lookup."""
+        key_string = "|".join(str(arg) for arg in args)
+        return hashlib.md5(key_string.encode()).hexdigest()
+
+    def get_search_results(
+        self,
+        query: str,
+        num_results: int,
+        location: Optional[str],
+        language: Optional[str],
+    ) -> Optional[List[str]]:
+        """Get cached search results."""
+        key = self._hash_key(query, num_results, location or "", language or "")
+        result = self.search_cache.get(key)
+
+        if result is not None:
+            self.stats.record_search_hit()
+        else:
+            self.stats.record_search_miss()
+
+        return result
+
+    def set_search_results(
+        self,
+        query: str,
+        num_results: int,
+        location: Optional[str],
+        language: Optional[str],
+        results: List[str],
+    ):
+        """Cache search results."""
+        key = self._hash_key(query, num_results, location or "", language or "")
+        self.search_cache.set(key, results)
+
+    def get_scraped_content(self, url: str) -> Optional[str]:
+        """Get cached website content."""
+        key = self._hash_key(url)
+        result = self.scrape_cache.get(key)
+
+        if result is not None:
+            self.stats.record_scrape_hit()
+        else:
+            self.stats.record_scrape_miss()
+
+        return result
+
+    def set_scraped_content(self, url: str, content: str):
+        """Cache website content."""
+        key = self._hash_key(url)
+        self.scrape_cache.set(key, content)
+
+    def get_verification_result(self, url: str, company_name: str) -> Optional[Dict]:
+        """Get cached verification result."""
+        key = self._hash_key(url, company_name)
+        result = self.verification_cache.get(key)
+
+        if result is not None:
+            self.stats.record_verification_hit()
+        else:
+            self.stats.record_verification_miss()
+
+        return result
+
+    def set_verification_result(self, url: str, company_name: str, result: Any):
+        """Cache verification result (convert Pydantic to dict)."""
+        key = self._hash_key(url, company_name)
+        # Convert Pydantic model to dict for JSON serialization
+        if hasattr(result, "model_dump"):
+            result_dict = result.model_dump()
+        elif hasattr(result, "dict"):
+            result_dict = result.dict()
+        else:
+            result_dict = result
+        self.verification_cache.set(key, result_dict)
+
+    def get_extraction_result(self, url: str, company_name: str) -> Optional[Dict]:
+        """Get cached extraction result."""
+        key = self._hash_key(url, company_name)
+        result = self.extraction_cache.get(key)
+
+        if result is not None:
+            self.stats.record_extraction_hit()
+        else:
+            self.stats.record_extraction_miss()
+
+        return result
+
+    def set_extraction_result(self, url: str, company_name: str, result: Any):
+        """Cache extraction result (convert Pydantic to dict)."""
+        key = self._hash_key(url, company_name)
+        # Convert Pydantic model to dict for JSON serialization
+        if hasattr(result, "model_dump"):
+            result_dict = result.model_dump()
+        elif hasattr(result, "dict"):
+            result_dict = result.dict()
+        else:
+            result_dict = result
+        self.extraction_cache.set(key, result_dict)
+
+    def _load_from_disk(self):
+        """Load cache from disk if file exists."""
+        if not os.path.exists(self.cache_file):
+            logging.info("No persistent cache file found, starting fresh")
+            return
+
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Load each cache type
+            if "search" in data:
+                for key, value in data["search"].items():
+                    self.search_cache.set(key, value)
+
+            if "scrape" in data:
+                for key, value in data["scrape"].items():
+                    self.scrape_cache.set(key, value)
+
+            if "verification" in data:
+                for key, value in data["verification"].items():
+                    self.verification_cache.set(key, value)
+
+            if "extraction" in data:
+                for key, value in data["extraction"].items():
+                    self.extraction_cache.set(key, value)
+
+            logging.info(f"Loaded persistent cache from {self.cache_file}")
+            logging.info(f"  Search entries: {self.search_cache.size()}")
+            logging.info(f"  Scrape entries: {self.scrape_cache.size()}")
+            logging.info(f"  Verification entries: {self.verification_cache.size()}")
+            logging.info(f"  Extraction entries: {self.extraction_cache.size()}")
+
+        except Exception as e:
+            logging.warning(f"Could not load cache from disk: {e}")
+
+    def save_to_disk(self):
+        """Save cache to disk for persistence across runs."""
+        if not self.enable_disk_cache:
+            return
+
+        try:
+            # Ensure data directory exists
+            Path("data").mkdir(parents=True, exist_ok=True)
+
+            data = {
+                "search": dict(self.search_cache.cache),
+                "scrape": dict(self.scrape_cache.cache),
+                "verification": dict(self.verification_cache.cache),
+                "extraction": dict(self.extraction_cache.cache),
+                "saved_at": datetime.now().isoformat(),
+            }
+
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            logging.info(f"Saved cache to disk: {self.cache_file}")
+
+        except Exception as e:
+            logging.error(f"Could not save cache to disk: {e}")
+
+    def clear_all(self):
+        """Clear all caches."""
+        self.search_cache.clear()
+        self.scrape_cache.clear()
+        self.verification_cache.clear()
+        self.extraction_cache.clear()
+        logging.info("All caches cleared")
+
+    def get_stats(self) -> CacheStats:
+        """Return cache statistics."""
+        return self.stats
+
+
+# Global cache instance (initialized in main)
+_cache: Optional[DataCache] = None
+
+
+def get_cache() -> Optional[DataCache]:
+    """Get the global cache instance."""
+    return _cache
+
+
+def init_cache(
+    enable_disk_cache: bool = False, max_memory_size: int = 1000
+) -> DataCache:
+    """
+    Initialize the global cache instance.
+
+    Args:
+        enable_disk_cache: Whether to persist cache to disk
+        max_memory_size: Maximum entries in memory (LRU eviction)
+
+    Returns:
+        Initialized DataCache instance
+    """
+    global _cache
+    _cache = DataCache(
+        enable_disk_cache=enable_disk_cache, max_memory_size=max_memory_size
+    )
+    return _cache
+
+
+def clear_cache():
+    """Clear all caches and optionally delete cache file."""
+    cache = get_cache()
+    if cache:
+        cache.clear_all()
+        logging.info("Memory cache cleared")
+
+        # Also delete disk cache file if it exists
+        if os.path.exists(CACHE_FILE):
+            try:
+                os.remove(CACHE_FILE)
+                logging.info(f"Disk cache file deleted: {CACHE_FILE}")
+            except Exception as e:
+                logging.error(f"Could not delete cache file: {e}")
+    else:
+        logging.warning("No cache instance to clear")
+
+
 # Define the data structure we want Gemini to extract
 class CompanyInfo(BaseModel):
-    location: str = Field(..., description="Physical address or location of the company")
-    contact_email: str = Field(..., description="Contact email address found on the page")
-    application_service: str = Field(..., description="Name of main application, service, or product")
+    location: str = Field(
+        ..., description="Physical address or location of the company"
+    )
+    contact_email: str = Field(
+        ..., description="Contact email address found on the page"
+    )
+    application_service: str = Field(
+        ..., description="Name of main application, service, or product"
+    )
     homepage_url: str = Field(..., description="The official website URL")
 
 
 class WebsiteRelevance(BaseModel):
-    is_relevant: bool = Field(..., description="Whether the website is relevant to the company and AI/tech industry")
-    relevance_category: str = Field(..., description="Primary category: 'Robotics and Automation AI', 'Vision AI', 'AI Software and Platform', 'Smart Factory and Manufacturing AI', 'Logistics and Mobility AI', 'Service/Education/Healthcare AI', 'AI Semiconductor and Hardware', or 'Not Relevant'")
+    is_relevant: bool = Field(
+        ...,
+        description="Whether the website is relevant to the company and AI/tech industry",
+    )
+    relevance_category: str = Field(
+        ...,
+        description="Primary category: 'Robotics and Automation AI', 'Vision AI', 'AI Software and Platform', 'Smart Factory and Manufacturing AI', 'Logistics and Mobility AI', 'Service/Education/Healthcare AI', 'AI Semiconductor and Hardware', or 'Not Relevant'",
+    )
     confidence_score: float = Field(..., description="Confidence score from 0.0 to 1.0")
-    reason: str = Field(..., description="Brief reason for the relevance decision, mentioning specific keywords found")
+    reason: str = Field(
+        ...,
+        description="Brief reason for the relevance decision, mentioning specific keywords found",
+    )
 
 
 # ================= HELPER FUNCTIONS =================
+
 
 def search_google_serper(query, num_results=3, location=None, language=None):
     """
     Uses Serper.dev to find the official website URL.
     Returns a list of organic links (up to num_results).
+
+    CACHED: Results are cached to avoid duplicate searches.
 
     Args:
         query: Search query string
@@ -131,11 +534,17 @@ def search_google_serper(query, num_results=3, location=None, language=None):
         location: Country code (e.g., 'us', 'kr', 'jp') or None for global
         language: Language code (e.g., 'en', 'ko', 'ja') or None for auto
     """
+    # Check cache first
+    cache = get_cache()
+    if cache:
+        cached_results = cache.get_search_results(
+            query, num_results, location, language
+        )
+        if cached_results is not None:
+            return cached_results
+
     url = "https://google.serper.dev/search"
-    payload = {
-        "q": query,
-        "num": num_results
-    }
+    payload = {"q": query, "num": num_results}
 
     # Add optional location and language filters
     if location:
@@ -143,20 +552,30 @@ def search_google_serper(query, num_results=3, location=None, language=None):
     if language:
         payload["hl"] = language
 
-    headers = {
-        'X-API-KEY': SERPER_API_KEY,
-        'Content-Type': 'application/json'
-    }
+    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
 
     try:
-        response = requests.request("POST", url, headers=headers, data=json.dumps(payload))
+        response = requests.request(
+            "POST", url, headers=headers, data=json.dumps(payload)
+        )
         results = response.json()
 
         # Return multiple organic links for verification
-        if 'organic' in results and len(results['organic']) > 0:
-            return [result['link'] for result in results['organic'][:num_results]]
+        if "organic" in results and len(results["organic"]) > 0:
+            links = [result["link"] for result in results["organic"][:num_results]]
+
+            # Cache the results
+            if cache:
+                cache.set_search_results(query, num_results, location, language, links)
+
+            return links
     except Exception as e:
         logging.error(f"Search Error: {e}")
+
+    # Cache empty results too (to avoid retrying failed searches)
+    if cache:
+        cache.set_search_results(query, num_results, location, language, [])
+
     return []
 
 
@@ -226,15 +645,49 @@ def build_search_queries(company_name, pic_name=None, roo_name=None):
 def scrape_website_content(url):
     """
     Downloads the website and extracts the main text using Trafilatura.
+
+    CACHED: Content is cached to avoid re-downloading the same URLs.
     """
     if not url:
         return ""
+
+    # Check cache first
+    cache = get_cache()
+    if cache:
+        cached_content = cache.get_scraped_content(url)
+        if cached_content is not None:
+            return cached_content
 
     try:
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
             # extract_metadata can sometimes get description/title if body is empty
-            text = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
+            text = trafilatura.extract(
+                downloaded, include_comments=False, include_tables=True
+            )
+            content = text if text else ""
+
+            # Cache the content
+            if cache:
+                cache.set_scraped_content(url, content)
+
+            return content
+    except Exception as e:
+        logging.error(f"Scrape Error for {url}: {e}")
+
+    # Cache empty results too
+    if cache:
+        cache.set_scraped_content(url, "")
+
+    return ""
+
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            # extract_metadata can sometimes get description/title if body is empty
+            text = trafilatura.extract(
+                downloaded, include_comments=False, include_tables=True
+            )
             return text if text else ""
     except Exception as e:
         logging.error(f"Scrape Error for {url}: {e}")
@@ -245,14 +698,24 @@ def verify_website_relevance(text_content, company_name, url):
     """
     Verify if the website is relevant to the company and related to AI/tech industries.
     Returns WebsiteRelevance object.
+
+    CACHED: Verification results are cached by URL and company name.
     """
     if not text_content or len(text_content) < 50:
         return WebsiteRelevance(
             is_relevant=False,
             relevance_category="Not Relevant",
             confidence_score=0.0,
-            reason="Insufficient content to verify"
+            reason="Insufficient content to verify",
         )
+
+    # Check cache first
+    cache = get_cache()
+    if cache:
+        cached_result = cache.get_verification_result(url, company_name)
+        if cached_result is not None:
+            # Convert dict back to WebsiteRelevance object
+            return WebsiteRelevance(**cached_result)
 
     # Clean and truncate text for token optimization
     clean_text = " ".join(text_content.split())[:8000]
@@ -319,31 +782,57 @@ def verify_website_relevance(text_content, company_name, url):
 
     try:
         response = client.models.generate_content(
-            model='gemini-3-flash-preview',
+            model="gemini-3-flash-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type='application/json',
+                response_mime_type="application/json",
                 response_schema=WebsiteRelevance,
             ),
         )
-        return response.parsed
+        result = response.parsed
+
+        # Cache the result
+        if cache:
+            cache.set_verification_result(url, company_name, result)
+
+        return result
     except Exception as e:
         logging.error(f"Verification Error: {e}")
-        return WebsiteRelevance(
+        error_result = WebsiteRelevance(
             is_relevant=False,
             relevance_category="Error",
             confidence_score=0.0,
-            reason=f"Error during verification: {str(e)}"
+            reason=f"Error during verification: {str(e)}",
         )
+
+        # Cache error results too (to avoid retrying)
+        if cache:
+            cache.set_verification_result(url, company_name, error_result)
+
+        return error_result
 
 
 def analyze_with_gemini(text_content, company_name, url):
     """
     Sends the website text to Gemini Flash to extract specific fields.
+
+    CACHED: Extraction results are cached by URL and company name.
     """
     if not text_content:
-        return CompanyInfo(location="Not Found", contact_email="Not Found", application_service="Not Found",
-                           homepage_url=url or "Not Found")
+        return CompanyInfo(
+            location="Not Found",
+            contact_email="Not Found",
+            application_service="Not Found",
+            homepage_url=url or "Not Found",
+        )
+
+    # Check cache first
+    cache = get_cache()
+    if cache:
+        cached_result = cache.get_extraction_result(url, company_name)
+        if cached_result is not None:
+            # Convert dict back to CompanyInfo object
+            return CompanyInfo(**cached_result)
 
     # Optimize tokens: Remove excessive whitespace/newlines and truncate
     # 10k chars is usually sufficient (~3-5k tokens)
@@ -362,20 +851,38 @@ def analyze_with_gemini(text_content, company_name, url):
 
     try:
         response = client.models.generate_content(
-            model='gemini-3-flash-preview',  # Use Flash for speed/cost
+            model="gemini-3-flash-preview",  # Use Flash for speed/cost
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type='application/json',
+                response_mime_type="application/json",
                 response_schema=CompanyInfo,
             ),
         )
-        return response.parsed
+        result = response.parsed
+
+        # Cache the result
+        if cache:
+            cache.set_extraction_result(url, company_name, result)
+
+        return result
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
-        return CompanyInfo(location="Error", contact_email="Error", application_service="Error", homepage_url=url)
+        error_result = CompanyInfo(
+            location="Error",
+            contact_email="Error",
+            application_service="Error",
+            homepage_url=url,
+        )
+
+        # Cache error results too
+        if cache:
+            cache.set_extraction_result(url, company_name, error_result)
+
+        return error_result
 
 
 # ================= MAIN EXECUTION =================
+
 
 def load_data(file_path, logger, output_file=None, continue_previous=True):
     """
@@ -403,7 +910,7 @@ def load_data(file_path, logger, output_file=None, continue_previous=True):
     logger.info(f"Loading data from {file_to_load}...")
 
     # Handle potential Excel file or CSV
-    if file_to_load.endswith('.xlsx'):
+    if file_to_load.endswith(".xlsx"):
         try:
             # Read only the first sheet (sheet_id is 1-indexed in Polars)
             result = pl.read_excel(file_to_load, sheet_id=1)
@@ -433,10 +940,10 @@ def load_data(file_path, logger, output_file=None, continue_previous=True):
     columns_to_drop = []
     for col in df.columns:
         # Drop duplicate columns that have "_1", "_2" suffix
-        if col.endswith(('_1', '_2', '_3')):
-            base_name = col.rsplit('_', 1)[0]
+        if col.endswith(("_1", "_2", "_3")):
+            base_name = col.rsplit("_", 1)[0]
             # Only drop if it's one of the columns we know are duplicated
-            if base_name in ['Company', 'PIC', 'ROO', 'Position']:
+            if base_name in ["Company", "PIC", "ROO", "Position"]:
                 columns_to_drop.append(col)
 
     if columns_to_drop:
@@ -444,22 +951,33 @@ def load_data(file_path, logger, output_file=None, continue_previous=True):
         logger.info(f"Dropped duplicate columns: {columns_to_drop}")
 
     # Ensure Area column exists (we use Area instead of Location)
-    if 'Area' not in df.columns:
-        df = df.with_columns(pl.lit(None).alias('Area'))
+    if "Area" not in df.columns:
+        df = df.with_columns(pl.lit(None).alias("Area"))
 
     # Count how many rows already have data (if loading from output file)
     if file_to_load == output_file:
-        filled_count = sum(1 for row in df.to_dicts()
-                          if row.get('Homepage URL') and
-                          row['Homepage URL'] not in [None, "Not Found", "", "None", "Error"])
+        filled_count = sum(
+            1
+            for row in df.to_dicts()
+            if row.get("Homepage URL")
+            and row["Homepage URL"] not in [None, "Not Found", "", "None", "Error"]
+        )
         logger.info(f"📊 Previous results: {filled_count} rows already processed")
 
     logger.info(f"Loaded {len(df)} rows with {len(df.columns)} columns")
     return df
 
 
-def process_company(row, index, logger, search_location=None, search_language=None,
-                    max_queries=3, max_urls_per_query=2, min_confidence=0.7):
+def process_company(
+    row,
+    index,
+    logger,
+    search_location=None,
+    search_language=None,
+    max_queries=3,
+    max_urls_per_query=2,
+    min_confidence=0.7,
+):
     """
     Process a single company row with relevance verification.
 
@@ -470,20 +988,22 @@ def process_company(row, index, logger, search_location=None, search_language=No
 
     Returns True if processed successfully, False if failed.
     """
-    company_name = row.get('Company') or ''
+    company_name = row.get("Company") or ""
 
     if not company_name:
-        row['Homepage URL'] = "Not Found"
+        row["Homepage URL"] = "Not Found"
         logger.warning(f"Row {index}: Empty company name")
         return True
 
     # Get PIC and ROO if available (optional fields)
-    pic_name = row.get('PIC') or None
-    roo_name = row.get('ROO') or None
+    pic_name = row.get("PIC") or None
+    roo_name = row.get("ROO") or None
 
-    logger.info(f"Row {index}: Processing '{company_name}'" +
-                (f" (PIC: {pic_name})" if pic_name else "") +
-                (f" (ROO: {roo_name})" if roo_name else ""))
+    logger.info(
+        f"Row {index}: Processing '{company_name}'"
+        + (f" (PIC: {pic_name})" if pic_name else "")
+        + (f" (ROO: {roo_name})" if roo_name else "")
+    )
 
     # Step A: Build and try multiple search queries (includes PIC/ROO if available)
     all_queries = build_search_queries(company_name, pic_name, roo_name)
@@ -497,8 +1017,12 @@ def process_company(row, index, logger, search_location=None, search_language=No
         # Try each search query until we find a relevant website
         for query_idx, search_query in enumerate(search_queries):
             # Get top results for each query
-            urls = search_google_serper(search_query, num_results=max_urls_per_query,
-                                       location=search_location, language=search_language)
+            urls = search_google_serper(
+                search_query,
+                num_results=max_urls_per_query,
+                location=search_location,
+                language=search_language,
+            )
 
             if not urls:
                 continue
@@ -515,12 +1039,19 @@ def process_company(row, index, logger, search_location=None, search_language=No
                 relevance = verify_website_relevance(text, company_name, url)
 
                 # If we found a relevant website with good confidence, use it
-                if relevance.is_relevant and relevance.confidence_score >= min_confidence:
+                if (
+                    relevance.is_relevant
+                    and relevance.confidence_score >= min_confidence
+                ):
                     found_url = url
                     verified_relevance = relevance
                     website_text = text
-                    logger.info(f"Row {index}: ✓ Found relevant site for '{company_name}': {url}")
-                    logger.info(f"Row {index}:   Category: {relevance.relevance_category}, Confidence: {relevance.confidence_score:.2f}")
+                    logger.info(
+                        f"Row {index}: ✓ Found relevant site for '{company_name}': {url}"
+                    )
+                    logger.info(
+                        f"Row {index}:   Category: {relevance.relevance_category}, Confidence: {relevance.confidence_score:.2f}"
+                    )
                     break
 
             # If we found a relevant site, stop trying other queries
@@ -536,22 +1067,28 @@ def process_company(row, index, logger, search_location=None, search_language=No
             extracted_data = analyze_with_gemini(website_text, company_name, found_url)
 
             # Update existing columns from Excel
-            row['Homepage URL'] = found_url
-            row['Area'] = extracted_data.location
-            row['Application'] = extracted_data.application_service
-            row['Email'] = extracted_data.contact_email
-            logger.info(f"Row {index}: ✓ Successfully extracted data for '{company_name}'")
+            row["Homepage URL"] = found_url
+            row["Area"] = extracted_data.location
+            row["Application"] = extracted_data.application_service
+            row["Email"] = extracted_data.contact_email
+            logger.info(
+                f"Row {index}: ✓ Successfully extracted data for '{company_name}'"
+            )
         else:
             # No relevant website found
-            row['Homepage URL'] = "Not Found"
-            reason = verified_relevance.reason if verified_relevance else "No results found"
-            logger.warning(f"Row {index}: ✗ No relevant site for '{company_name}': {reason}")
+            row["Homepage URL"] = "Not Found"
+            reason = (
+                verified_relevance.reason if verified_relevance else "No results found"
+            )
+            logger.warning(
+                f"Row {index}: ✗ No relevant site for '{company_name}': {reason}"
+            )
 
         return True
 
     except Exception as e:
         logger.error(f"Row {index}: Error processing '{company_name}': {str(e)}")
-        row['Homepage URL'] = "Error"
+        row["Homepage URL"] = "Error"
         return False
 
 
@@ -569,7 +1106,7 @@ def should_skip_row(row, skip_filled=True):
     if not skip_filled:
         return False
 
-    homepage = row.get('Homepage URL')
+    homepage = row.get("Homepage URL")
     return homepage is not None and homepage not in [None, "Not Found", "", "None"]
 
 
@@ -587,7 +1124,10 @@ def main(
     search_language=None,
     max_queries=3,
     max_urls_per_query=2,
-    min_confidence=0.7
+    min_confidence=0.7,
+    enable_cache=True,
+    enable_disk_cache=False,
+    cache_size=1000,
 ):
     """
     Main execution function with configurable parameters.
@@ -607,12 +1147,26 @@ def main(
         max_queries: Maximum search queries to try per company (default: 3, range: 1-10)
         max_urls_per_query: Maximum URLs to verify per query (default: 2, range: 1-3)
         min_confidence: Minimum confidence score to accept result (default: 0.7, range: 0.5-1.0)
+        enable_cache: Enable in-memory caching (default: True)
+        enable_disk_cache: Persist cache to disk across runs (default: False)
+        cache_size: Maximum entries in memory cache (default: 1000)
     """
     # Initialize logging
     logger = setup_logging()
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("Starting data extraction process")
-    logger.info("="*60)
+    logger.info("=" * 60)
+
+    # Initialize cache system
+    if enable_cache:
+        cache = init_cache(
+            enable_disk_cache=enable_disk_cache, max_memory_size=cache_size
+        )
+        logger.info(
+            f"Cache system initialized (disk_cache={'enabled' if enable_disk_cache else 'disabled'}, max_size={cache_size})"
+        )
+    else:
+        logger.info("Cache system disabled")
 
     try:
         # 1. Load Data (continues from output file if exists)
@@ -629,7 +1183,7 @@ def main(
             if checkpoint:
                 logger.info(f"Found checkpoint from {checkpoint['timestamp']}")
                 logger.info(f"Last processed row: {checkpoint['last_row_index']}")
-                start_row = checkpoint['last_row_index'] + 1
+                start_row = checkpoint["last_row_index"] + 1
                 logger.info(f"Resuming from row {start_row}")
             else:
                 logger.info("No checkpoint found, starting from beginning")
@@ -645,9 +1199,13 @@ def main(
         rows_to_process = data[actual_start:actual_end]
         total_rows_to_process = len(rows_to_process)
 
-        logger.info(f"Processing rows {actual_start} to {actual_end-1} ({total_rows_to_process} rows)")
+        logger.info(
+            f"Processing rows {actual_start} to {actual_end - 1} ({total_rows_to_process} rows)"
+        )
         logger.info(f"Total rows in file: {total_data_rows}")
-        logger.info(f"Continue mode: {'Enabled - preserving previous results' if continue_previous else 'Disabled - fresh start'}")
+        logger.info(
+            f"Continue mode: {'Enabled - preserving previous results' if continue_previous else 'Disabled - fresh start'}"
+        )
         logger.info(f"Performance settings:")
         logger.info(f"  - Max queries per company: {max_queries}")
         logger.info(f"  - Max URLs per query: {max_urls_per_query}")
@@ -662,7 +1220,9 @@ def main(
         error_count = 0
         skipped_count = 0
 
-        for local_index, row in tqdm(enumerate(rows_to_process), total=total_rows_to_process, desc="Processing"):
+        for local_index, row in tqdm(
+            enumerate(rows_to_process), total=total_rows_to_process, desc="Processing"
+        ):
             actual_index = actual_start + local_index
 
             # Skip if already filled (useful if script crashes and you restart)
@@ -671,8 +1231,16 @@ def main(
                 continue
 
             # Process the company
-            success = process_company(row, actual_index, logger, search_location, search_language,
-                                     max_queries, max_urls_per_query, min_confidence)
+            success = process_company(
+                row,
+                actual_index,
+                logger,
+                search_location,
+                search_language,
+                max_queries,
+                max_urls_per_query,
+                min_confidence,
+            )
             processed_count += 1
 
             if success:
@@ -687,45 +1255,81 @@ def main(
             if processed_count % save_interval == 0:
                 save_results(data, output_file)
                 save_checkpoint(processed_count, total_rows_to_process, actual_index)
-                logger.info(f"Progress saved at row {actual_index} ({processed_count}/{total_rows_to_process} processed)")
+
+                # Also save cache if disk caching is enabled
+                if enable_cache and enable_disk_cache and cache:
+                    cache.save_to_disk()
+
+                logger.info(
+                    f"Progress saved at row {actual_index} ({processed_count}/{total_rows_to_process} processed)"
+                )
 
         # 4. Final Save
         save_results(data, output_file)
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info("Processing completed successfully!")
         logger.info(f"Total processed: {processed_count} companies")
-        logger.info(f"Success: {success_count}, Errors: {error_count}, Skipped: {skipped_count}")
+        logger.info(
+            f"Success: {success_count}, Errors: {error_count}, Skipped: {skipped_count}"
+        )
         logger.info(f"Results saved to: {output_file}")
-        logger.info("="*60)
+        logger.info("=" * 60)
+
+        # Print cache statistics
+        if enable_cache and cache:
+            cache.get_stats().print_stats(logger)
+
+            # Save cache to disk if enabled
+            if enable_disk_cache:
+                cache.save_to_disk()
 
         # Clear checkpoint on successful completion
         clear_checkpoint()
 
     except KeyboardInterrupt:
-        logger.warning("\n" + "="*60)
+        logger.warning("\n" + "=" * 60)
         logger.warning("Process interrupted by user!")
         logger.warning(f"Progress saved to: {output_file}")
         logger.warning(f"Checkpoint saved. Use resume_from_checkpoint=True to continue")
-        logger.warning("="*60)
+        logger.warning("=" * 60)
         # Save current progress if possible
         try:
             save_results(data, output_file)
-            if 'processed_count' in locals() and 'total_rows_to_process' in locals() and 'actual_index' in locals():
+            if (
+                "processed_count" in locals()
+                and "total_rows_to_process" in locals()
+                and "actual_index" in locals()
+            ):
                 save_checkpoint(processed_count, total_rows_to_process, actual_index)
+
+            # Save cache if enabled
+            if enable_cache and enable_disk_cache and "cache" in locals():
+                cache.save_to_disk()
+                logger.info("Cache saved to disk")
         except Exception as save_err:
             logger.error(f"Could not save progress on interrupt: {save_err}")
 
     except Exception as e:
-        logger.error("="*60)
+        logger.error("=" * 60)
         logger.error(f"Fatal error occurred: {str(e)}")
-        logger.error("="*60)
+        logger.error("=" * 60)
         logger.exception(e)
         # Try to save what we have
         try:
-            if 'data' in locals():
+            if "data" in locals():
                 save_results(data, output_file)
-            if 'processed_count' in locals() and 'total_rows_to_process' in locals() and 'actual_index' in locals():
+            if (
+                "processed_count" in locals()
+                and "total_rows_to_process" in locals()
+                and "actual_index" in locals()
+            ):
                 save_checkpoint(processed_count, total_rows_to_process, actual_index)
+
+            # Save cache if enabled
+            if enable_cache and enable_disk_cache and "cache" in locals():
+                cache.save_to_disk()
+                logger.info("Cache saved to disk")
+
             logger.info("Emergency save completed")
         except Exception as save_err:
             logger.error(f"Could not save emergency backup: {save_err}")
@@ -771,10 +1375,31 @@ if __name__ == "__main__":
     #     save_interval=10
     # )
 
+    # ========== CACHING EXAMPLES ==========
+
+    # Enable persistent disk cache (cache persists across runs - saves API calls!)
+    # Recommended for multi-day batch processing
+    # main(
+    #     enable_cache=True,           # Enable caching (default: True)
+    #     enable_disk_cache=True,      # Persist cache to disk (default: False)
+    #     cache_size=2000              # Max entries in memory (default: 1000)
+    # )
+
+    # Disable caching (not recommended, but available)
+    # main(enable_cache=False)
+
     # ========== COMMON USE CASES ==========
 
-    # Test first 10 rows with FAST mode
-    main(start_row=705, end_row=1763, max_queries=2, max_urls_per_query=1, rate_limit=0.2)
+    # Test first 10 rows with FAST mode and caching
+    main(
+        start_row=705,
+        end_row=1763,
+        max_queries=2,
+        max_urls_per_query=1,
+        rate_limit=0.2,
+        enable_cache=True,  # Caching enabled
+        enable_disk_cache=False,  # In-memory only for testing
+    )
 
     # Process specific range (e.g., rows 100-200)
     # main(start_row=100, end_row=200)
@@ -782,33 +1407,40 @@ if __name__ == "__main__":
     # Resume after interruption
     # main(resume_from_checkpoint=True)
 
-    # Process all with Korean location filter
-    # main(search_location='kr', search_language='ko')
+    # Process all with Korean location filter and persistent cache
+    # main(
+    #     search_location='kr',
+    #     search_language='ko',
+    #     enable_disk_cache=True  # Cache persists across runs
+    # )
 
     # ========== MULTI-DAY BATCH PROCESSING (1800 rows) ==========
     # Process in batches over multiple days - results accumulate automatically!
     # The script will load previous results and continue from where you left off.
+    # IMPORTANT: Use enable_disk_cache=True to cache search/scrape results across days!
 
     # DAY 1: Process rows 0-300 (30-45 minutes)
-    # main(start_row=0, end_row=300, max_queries=2, max_urls_per_query=1)
+    # main(start_row=0, end_row=300, max_queries=2, max_urls_per_query=1, enable_disk_cache=True)
 
     # DAY 2: Process rows 300-600 (30-45 minutes)
     # Previous results (0-299) are preserved automatically!
-    # main(start_row=300, end_row=600, max_queries=2, max_urls_per_query=1)
+    # Cache from Day 1 is reused - duplicate companies processed instantly!
+    # main(start_row=300, end_row=600, max_queries=2, max_urls_per_query=1, enable_disk_cache=True)
 
     # DAY 3: Process rows 600-900 (30-45 minutes)
-    # main(start_row=600, end_row=900, max_queries=2, max_urls_per_query=1)
+    # main(start_row=600, end_row=900, max_queries=2, max_urls_per_query=1, enable_disk_cache=True)
 
     # DAY 4: Process rows 900-1200 (30-45 minutes)
-    # main(start_row=900, end_row=1200, max_queries=2, max_urls_per_query=1)
+    # main(start_row=900, end_row=1200, max_queries=2, max_urls_per_query=1, enable_disk_cache=True)
 
     # DAY 5: Process rows 1200-1500 (30-45 minutes)
-    # main(start_row=1200, end_row=1500, max_queries=2, max_urls_per_query=1)
+    # main(start_row=1200, end_row=1500, max_queries=2, max_urls_per_query=1, enable_disk_cache=True)
 
     # DAY 6: Process rows 1500-1800 (30-45 minutes)
-    # main(start_row=1500, end_row=1800, max_queries=2, max_urls_per_query=1)
+    # main(start_row=1500, end_row=1800, max_queries=2, max_urls_per_query=1, enable_disk_cache=True)
 
     # Result: All 1800 rows in ONE file after 6 days! 🎉
+    # With disk cache enabled, duplicate companies are processed 10x faster!
 
     # ========== DISABLE CONTINUE MODE (Fresh Start) ==========
     # If you want to start fresh and ignore previous results:
