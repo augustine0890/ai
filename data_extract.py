@@ -58,6 +58,8 @@ import json
 import os
 import logging
 import hashlib
+import re
+from urllib.parse import urlparse, urlunparse
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -67,7 +69,6 @@ from google.genai import types
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from functools import lru_cache
-from typing import Optional, Dict, List, Any
 from collections import OrderedDict
 
 # Load environment variables from .env file
@@ -794,17 +795,258 @@ class WebsiteRelevance(BaseModel):
 
 # ================= HELPER FUNCTIONS =================
 
+LEGAL_SUFFIXES = {
+    "inc",
+    "inc.",
+    "incorporated",
+    "corp",
+    "corp.",
+    "corporation",
+    "co",
+    "co.",
+    "company",
+    "ltd",
+    "ltd.",
+    "limited",
+    "llc",
+    "plc",
+    "gmbh",
+    "s.a.",
+    "s.a",
+    "ag",
+    "bv",
+    "oy",
+    "oyj",
+    "sas",
+    "sa",
+    "kg",
+    "합자회사",
+    "주식회사",
+    "유한회사",
+}
+
+OFFICIAL_TERMS = {
+    "official",
+    "homepage",
+    "website",
+    "about",
+    "company",
+    "corporate",
+    "contact",
+    "investor",
+    "ir",
+    "기업",
+    "회사",
+    "공식",
+    "홈페이지",
+    "회사",
+    "공식",
+    "홈페이지",
+}
+
+AI_TECH_TERMS = {
+    "ai",
+    "artificial intelligence",
+    "machine learning",
+    "deep learning",
+    "robotics",
+    "robot",
+    "automation",
+    "vision",
+    "computer vision",
+    "manufacturing",
+    "factory",
+    "smart factory",
+    "logistics",
+    "mobility",
+    "autonomous",
+    "semiconductor",
+    "chip",
+    "edge",
+    "healthcare",
+    "medical",
+    "chatbot",
+}
+
+LOW_SIGNAL_DOMAINS = {
+    "linkedin.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "tiktok.com",
+    "crunchbase.com",
+    "wikipedia.org",
+    "bloomberg.com",
+    "reuters.com",
+    "medium.com",
+    "angel.co",
+    "pitchbook.com",
+    "glassdoor.com",
+}
+
+
+def normalize_company_name(company_name: str) -> str:
+    """
+    Normalize a company name for matching and query generation.
+
+    Strips legal suffixes, punctuation, and redundant whitespace to produce
+    a stable identifier for scoring search results.
+
+    Args:
+        company_name: Raw company name from the dataset
+
+    Returns:
+        Normalized company name in lowercase without legal suffixes
+    """
+    if not company_name:
+        return ""
+
+    cleaned = re.sub(r"[\.,;:()\[\]{}<>/\\\-]+", " ", company_name.lower())
+    tokens = [token for token in cleaned.split() if token and token not in LEGAL_SUFFIXES]
+    return " ".join(tokens).strip()
+
+
+def extract_company_tokens(company_name: str) -> List[str]:
+    """
+    Extract meaningful company tokens for relevance scoring.
+
+    Args:
+        company_name: Raw company name
+
+    Returns:
+        List of lowercase tokens with legal suffixes removed
+    """
+    normalized = normalize_company_name(company_name)
+    return [token for token in normalized.split() if len(token) > 1]
+
+
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    """
+    Remove duplicates while preserving original order.
+
+    Args:
+        items: List of strings
+
+    Returns:
+        Deduplicated list with original ordering
+    """
+    seen = set()
+    deduped = []
+    for item in items:
+        key = item.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def normalize_url(url: str) -> str:
+    """
+    Normalize a URL for consistent comparison and de-duplication.
+
+    Args:
+        url: Raw URL string
+
+    Returns:
+        Normalized URL without query/fragment and trailing slash
+    """
+    if not url:
+        return ""
+    parsed = urlparse(url.strip())
+    normalized = parsed._replace(query="", fragment="")
+    cleaned = urlunparse(normalized).rstrip("/")
+    return cleaned.lower()
+
+
+def score_search_result(
+    result: Dict[str, Any],
+    company_tokens: List[str],
+    query_terms: List[str]
+) -> float:
+    """
+    Score a Serper search result for relevance to the target company.
+
+    The scoring model prioritizes official company sites by looking for
+    company tokens in the domain/title/snippet, boosting official keywords
+    and AI/tech terms, and penalizing low-signal domains.
+
+    Args:
+        result: Serper result object with link/title/snippet
+        company_tokens: Normalized company name tokens
+        query_terms: Lowercase query tokens for context
+
+    Returns:
+        Numeric relevance score (higher is better)
+    """
+    link = result.get("link", "")
+    title = (result.get("title") or "").lower()
+    snippet = (result.get("snippet") or "").lower()
+
+    parsed = urlparse(link)
+    domain = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+
+    score = 0.0
+
+    # Company token matches
+    for token in company_tokens:
+        if token in domain:
+            score += 6.0
+        if token in path:
+            score += 2.0
+        if token in title:
+            score += 3.0
+        if token in snippet:
+            score += 1.5
+
+    # Official/brand signals
+    for term in OFFICIAL_TERMS:
+        if term in title or term in snippet:
+            score += 1.5
+        if term in path:
+            score += 0.5
+
+    # AI/tech signals
+    for term in AI_TECH_TERMS:
+        if term in title or term in snippet:
+            score += 0.75
+
+    # Penalize low-signal domains (social/news/aggregators)
+    if any(domain.endswith(bad) for bad in LOW_SIGNAL_DOMAINS):
+        score -= 5.0
+
+    # Minor preference for HTTPS
+    if parsed.scheme == "https":
+        score += 0.5
+
+    # Favor exact query terms in title/snippet
+    for term in query_terms:
+        if term in title:
+            score += 0.5
+        if term in snippet:
+            score += 0.25
+
+    return score
+
 
 def search_google_serper(
     query: str,
     num_results: int = 3,
     location: Optional[str] = None,
     language: Optional[str] = None,
-    timeout: int = 10
+    timeout: int = 10,
+    company_name: Optional[str] = None
 ) -> List[str]:
     """
-    Uses Serper.dev to find the official website URL.
-    Returns a list of organic links (up to num_results).
+    Query Serper.dev and rank results for company relevance.
+
+    Enhancements over raw Serper ordering:
+    - Scores results using company token matches, official keywords, and AI/tech terms
+    - Penalizes low-signal domains (social media, news aggregators)
+    - De-duplicates URLs while preserving the highest-scoring results
+    - Caches ranked results to reduce repeated API calls
 
     Args:
         query: Search query string
@@ -812,9 +1054,10 @@ def search_google_serper(
         location: Country code (e.g., 'us', 'kr', 'jp') or None for global
         language: Language code (e.g., 'en', 'ko', 'ja') or None for auto
         timeout: Request timeout in seconds (default: 10)
+        company_name: Company name for result scoring (optional but recommended)
 
     Returns:
-        List of URLs from organic search results
+        List of URLs from ranked organic search results
     """
     # Check cache first
     cache = get_cache()
@@ -837,12 +1080,51 @@ def search_google_serper(
     headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
 
     try:
-        response = requests.request("POST", url, headers=headers, data=json.dumps(payload))
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=timeout
+        )
+        response.raise_for_status()
         results = response.json()
 
-        # Return multiple organic links for verification
-        if 'organic' in results and len(results['organic']) > 0:
-            return [result['link'] for result in results['organic'][:num_results]]
+        organic_results = results.get("organic") or []
+        if not organic_results:
+            return []
+
+        query_terms = [term for term in query.lower().split() if len(term) > 1]
+        company_tokens = extract_company_tokens(company_name or query)
+
+        scored_results = []
+        for idx, result in enumerate(organic_results):
+            score = score_search_result(result, company_tokens, query_terms)
+            scored_results.append((score, idx, result))
+
+        scored_results.sort(key=lambda item: (-item[0], item[1]))
+
+        ordered_links = []
+        seen = set()
+        for score, _, result in scored_results:
+            link = result.get("link", "")
+            normalized_link = normalize_url(link)
+            if not normalized_link or normalized_link in seen:
+                continue
+            seen.add(normalized_link)
+            ordered_links.append(link)
+            if len(ordered_links) >= num_results:
+                break
+
+        if cache is not None:
+            cache.set_search_results(query, num_results, location, language, ordered_links)
+
+        return ordered_links
+    except requests.exceptions.Timeout:
+        logging.error(f"Search timeout for query: {query}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Search request error for '{query}': {e}")
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse search results: {e}")
     except Exception as e:
         logging.error(f"Search Error: {e}")
     return []
@@ -867,16 +1149,25 @@ def build_search_queries(
     Returns:
         List of search queries ordered by priority
     """
+    normalized_name = normalize_company_name(company_name)
+    normalized_company = normalized_name or company_name
+    quoted_name = f"\"{company_name}\""
+
     queries = []
+
+    # Priority 0: Exact company name matching
+    queries.append(f"{quoted_name} official website")
+    queries.append(f"{quoted_name} company")
+    queries.append(f"{quoted_name} AI")
 
     # Priority 1: Official website with AI/tech context
     queries.append(f"{company_name} AI technology official website")
-    queries.append(f"{company_name} artificial intelligence company")
+    queries.append(f"{normalized_company} artificial intelligence company")
 
     # Priority 2: Specific AI/tech industry keywords
-    queries.append(f"{company_name} robotics automation AI")
-    queries.append(f"{company_name} machine learning AI platform")
-    queries.append(f"{company_name} computer vision AI")
+    queries.append(f"{normalized_company} robotics automation AI")
+    queries.append(f"{normalized_company} machine learning AI platform")
+    queries.append(f"{normalized_company} computer vision AI")
 
     # Priority 3: Add PIC with AI context if available
     if pic_name:
@@ -884,36 +1175,41 @@ def build_search_queries(
         queries.append(f"{company_name} {pic_name} robotics")
 
     # Priority 4: Manufacturing and industrial AI keywords
-    queries.append(f"{company_name} smart factory AI manufacturing")
-    queries.append(f"{company_name} industrial automation robotics")
+    queries.append(f"{normalized_company} smart factory AI manufacturing")
+    queries.append(f"{normalized_company} industrial automation robotics")
 
     # Priority 5: Specific technology domains
-    queries.append(f"{company_name} vision AI image recognition")
-    queries.append(f"{company_name} autonomous vehicle self-driving")
-    queries.append(f"{company_name} AGV AMR robotics")
+    queries.append(f"{normalized_company} vision AI image recognition")
+    queries.append(f"{normalized_company} autonomous vehicle self-driving")
+    queries.append(f"{normalized_company} AGV AMR robotics")
 
     # Priority 6: Add ROO with tech context if available
     if roo_name:
         queries.append(f"{company_name} {roo_name} AI technology")
 
     # Priority 7: General tech and software keywords
-    queries.append(f"{company_name} AI software platform")
-    queries.append(f"{company_name} deep learning neural network")
-    queries.append(f"{company_name} AI chip semiconductor")
+    queries.append(f"{normalized_company} AI software platform")
+    queries.append(f"{normalized_company} deep learning neural network")
+    queries.append(f"{normalized_company} AI chip semiconductor")
 
     # Priority 8: Healthcare, service, logistics AI
-    queries.append(f"{company_name} healthcare AI medical")
-    queries.append(f"{company_name} logistics AI optimization")
-    queries.append(f"{company_name} chatbot AI service")
+    queries.append(f"{normalized_company} healthcare AI medical")
+    queries.append(f"{normalized_company} logistics AI optimization")
+    queries.append(f"{normalized_company} chatbot AI service")
 
     # Priority 9: Standard searches (broader fallback)
     queries.append(f"{company_name} official website")
-    queries.append(f"{company_name} company technology")
+    queries.append(f"{normalized_company} company technology")
+    queries.append(f"{normalized_company} corporate site")
+    queries.append(f"{normalized_company} about us")
+    queries.append(f"{normalized_company} 홈페이지")
+    # Korean-only and English-only targeting (no Chinese/Japanese terms)
 
     # Priority 10: Simple company name (last resort)
     queries.append(f"{company_name}")
+    queries.append(f"{normalized_company}")
 
-    return queries
+    return dedupe_preserve_order(queries)
 
 
 def scrape_website_content(url: str, timeout: int = 30) -> str:
@@ -1287,6 +1583,7 @@ def process_company(row, index, logger, search_location=None, search_language=No
                 num_results=max_urls_per_query,
                 location=search_location,
                 language=search_language,
+                company_name=company_name,
             )
 
             if not urls:
