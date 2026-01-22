@@ -1,0 +1,2 @@
+# RAG (Retrieval Augmented Generation)
+- If the users are asking questions that requires "connecting the dots" across pages, `Parent-Document Retrieval` is generally the industry standard for ensuring the LLM sees enough surrounding information.

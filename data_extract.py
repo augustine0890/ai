@@ -1,3 +1,19 @@
+"""
+Data Extraction Script for Company Information Enrichment
+
+This script enriches company data by:
+1. Searching for official company websites using Serper API
+2. Scraping website content with Trafilatura
+3. Verifying website relevance to AI/tech industries
+4. Extracting structured information using Google Gemini AI
+
+Features:
+- Progress tracking and checkpointing
+- Batch processing with configurable speed profiles
+- Resume capability after interruptions
+- Comprehensive logging
+"""
+
 import polars as pl
 import requests
 import trafilatura
@@ -8,6 +24,7 @@ import logging
 import hashlib
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 from tqdm import tqdm
 from google import genai
 from google.genai import types
@@ -488,29 +505,18 @@ def clear_cache():
         logging.warning("No cache instance to clear")
 
 
-# Define the data structure we want Gemini to extract
+# ================= DATA MODELS =================
+
 class CompanyInfo(BaseModel):
-    location: str = Field(
-        ..., description="Physical address or location of the company"
-    )
-    contact_email: str = Field(
-        ..., description="Contact email address found on the page"
-    )
-    application_service: str = Field(
-        ..., description="Name of main application, service, or product"
-    )
+    location: str = Field(..., description="Physical address or location of the company")
+    contact_email: str = Field(..., description="Contact email address found on the page")
+    application_service: str = Field(..., description="Name of main application, service, or product")
     homepage_url: str = Field(..., description="The official website URL")
 
 
 class WebsiteRelevance(BaseModel):
-    is_relevant: bool = Field(
-        ...,
-        description="Whether the website is relevant to the company and AI/tech industry",
-    )
-    relevance_category: str = Field(
-        ...,
-        description="Primary category: 'Robotics and Automation AI', 'Vision AI', 'AI Software and Platform', 'Smart Factory and Manufacturing AI', 'Logistics and Mobility AI', 'Service/Education/Healthcare AI', 'AI Semiconductor and Hardware', or 'Not Relevant'",
-    )
+    is_relevant: bool = Field(..., description="Whether the website is relevant to the company and AI/tech industry")
+    relevance_category: str = Field(..., description="Primary category: 'Robotics and Automation AI', 'Vision AI', 'AI Software and Platform', 'Smart Factory and Manufacturing AI', 'Logistics and Mobility AI', 'Service/Education/Healthcare AI', 'AI Semiconductor and Hardware', or 'Not Relevant'")
     confidence_score: float = Field(..., description="Confidence score from 0.0 to 1.0")
     reason: str = Field(
         ...,
@@ -521,18 +527,26 @@ class WebsiteRelevance(BaseModel):
 # ================= HELPER FUNCTIONS =================
 
 
-def search_google_serper(query, num_results=3, location=None, language=None):
+def search_google_serper(
+    query: str,
+    num_results: int = 3,
+    location: Optional[str] = None,
+    language: Optional[str] = None,
+    timeout: int = 10
+) -> List[str]:
     """
     Uses Serper.dev to find the official website URL.
     Returns a list of organic links (up to num_results).
 
-    CACHED: Results are cached to avoid duplicate searches.
-
     Args:
         query: Search query string
-        num_results: Number of results to return
+        num_results: Number of results to return (default: 3)
         location: Country code (e.g., 'us', 'kr', 'jp') or None for global
         language: Language code (e.g., 'en', 'ko', 'ja') or None for auto
+        timeout: Request timeout in seconds (default: 10)
+
+    Returns:
+        List of URLs from organic search results
     """
     # Check cache first
     cache = get_cache()
@@ -555,43 +569,35 @@ def search_google_serper(query, num_results=3, location=None, language=None):
     headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
 
     try:
-        response = requests.request(
-            "POST", url, headers=headers, data=json.dumps(payload)
-        )
+        response = requests.request("POST", url, headers=headers, data=json.dumps(payload))
         results = response.json()
 
         # Return multiple organic links for verification
-        if "organic" in results and len(results["organic"]) > 0:
-            links = [result["link"] for result in results["organic"][:num_results]]
-
-            # Cache the results
-            if cache:
-                cache.set_search_results(query, num_results, location, language, links)
-
-            return links
+        if 'organic' in results and len(results['organic']) > 0:
+            return [result['link'] for result in results['organic'][:num_results]]
     except Exception as e:
         logging.error(f"Search Error: {e}")
-
-    # Cache empty results too (to avoid retrying failed searches)
-    if cache:
-        cache.set_search_results(query, num_results, location, language, [])
-
     return []
 
 
-def build_search_queries(company_name, pic_name=None, roo_name=None):
+def build_search_queries(
+    company_name: str,
+    pic_name: Optional[str] = None,
+    roo_name: Optional[str] = None
+) -> List[str]:
     """
-    Build multiple search queries with AI/tech-focused keywords.
-    Prioritizes queries that target relevant industry websites.
-    Works globally with any language.
-    Optionally includes PIC (Person In Charge) and ROO for more specific searches.
+    Build prioritized search queries with AI/tech-focused keywords.
+
+    The queries are ordered by priority, starting with the most specific
+    AI/tech-focused searches and falling back to broader searches.
 
     Args:
         company_name: Company name (required)
         pic_name: Person In Charge name (optional)
         roo_name: ROO name (optional)
 
-    Returns a list of search queries ordered by priority.
+    Returns:
+        List of search queries ordered by priority
     """
     queries = []
 
@@ -642,11 +648,9 @@ def build_search_queries(company_name, pic_name=None, roo_name=None):
     return queries
 
 
-def scrape_website_content(url):
+def scrape_website_content(url: str, timeout: int = 30) -> str:
     """
     Downloads the website and extracts the main text using Trafilatura.
-
-    CACHED: Content is cached to avoid re-downloading the same URLs.
     """
     if not url:
         return ""
@@ -659,47 +663,24 @@ def scrape_website_content(url):
             return cached_content
 
     try:
-        downloaded = trafilatura.fetch_url(url)
+        downloaded = trafilatura.fetch_url(url, timeout=timeout)
         if downloaded:
             # extract_metadata can sometimes get description/title if body is empty
-            text = trafilatura.extract(
-                downloaded, include_comments=False, include_tables=True
-            )
-            content = text if text else ""
-
-            # Cache the content
-            if cache:
-                cache.set_scraped_content(url, content)
-
-            return content
-    except Exception as e:
-        logging.error(f"Scrape Error for {url}: {e}")
-
-    # Cache empty results too
-    if cache:
-        cache.set_scraped_content(url, "")
-
-    return ""
-
-    try:
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
-            # extract_metadata can sometimes get description/title if body is empty
-            text = trafilatura.extract(
-                downloaded, include_comments=False, include_tables=True
-            )
+            text = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
             return text if text else ""
     except Exception as e:
-        logging.error(f"Scrape Error for {url}: {e}")
+        logging.error(f"Scrape error for {url}: {e}")
     return ""
 
 
-def verify_website_relevance(text_content, company_name, url):
+def verify_website_relevance(
+    text_content: str,
+    company_name: str,
+    url: str
+) -> WebsiteRelevance:
     """
     Verify if the website is relevant to the company and related to AI/tech industries.
     Returns WebsiteRelevance object.
-
-    CACHED: Verification results are cached by URL and company name.
     """
     if not text_content or len(text_content) < 50:
         return WebsiteRelevance(
@@ -812,11 +793,13 @@ def verify_website_relevance(text_content, company_name, url):
         return error_result
 
 
-def analyze_with_gemini(text_content, company_name, url):
+def analyze_with_gemini(
+    text_content: str,
+    company_name: str,
+    url: str
+) -> CompanyInfo:
     """
     Sends the website text to Gemini Flash to extract specific fields.
-
-    CACHED: Extraction results are cached by URL and company name.
     """
     if not text_content:
         return CompanyInfo(
@@ -884,19 +867,29 @@ def analyze_with_gemini(text_content, company_name, url):
 # ================= MAIN EXECUTION =================
 
 
-def load_data(file_path, logger, output_file=None, continue_previous=True):
+def load_data(
+    file_path: str,
+    logger: logging.Logger,
+    output_file: Optional[str] = None,
+    continue_previous: bool = True
+) -> pl.DataFrame:
     """
-    Load data from Excel or CSV file (first sheet only).
-    Handles duplicate column names by keeping only the first occurrence.
-    Can continue from previous output file to preserve results.
+    Load data from Excel or CSV file with duplicate column handling.
+
+    Automatically detects and handles:
+    - Excel files (.xlsx) - reads first sheet only
+    - CSV files
+    - Duplicate column names (keeps first occurrence)
+    - Previous output files for continuation
 
     Args:
         file_path: Path to input file
         logger: Logger instance
         output_file: Path to output file (to check for previous results)
-        continue_previous: If True and output_file exists, load from output_file instead
+        continue_previous: If True and output_file exists, load from output_file
 
-    Returns a Polars DataFrame.
+    Returns:
+        Polars DataFrame with loaded data
     """
     # Check if we should continue from previous output
     if continue_previous and output_file and os.path.exists(output_file):
@@ -968,25 +961,29 @@ def load_data(file_path, logger, output_file=None, continue_previous=True):
     return df
 
 
-def process_company(
-    row,
-    index,
-    logger,
-    search_location=None,
-    search_language=None,
-    max_queries=3,
-    max_urls_per_query=2,
-    min_confidence=0.7,
-):
+def process_company(row, index, logger, search_location=None, search_language=None,
+                    max_queries=3, max_urls_per_query=2, min_confidence=0.7):
     """
-    Process a single company row with relevance verification.
+    Process a single company row with multi-stage verification.
+
+    Processing stages:
+    1. Build prioritized search queries
+    2. Search for candidate websites
+    3. Scrape and verify website relevance
+    4. Extract detailed company information
 
     Args:
-        max_queries: Maximum number of search queries to try (default: 3)
-        max_urls_per_query: Maximum URLs to check per query (default: 2)
+        row: Company data row (dict)
+        index: Row index for logging
+        logger: Logger instance
+        search_location: Country code for search localization
+        search_language: Language code for search
+        max_queries: Maximum search queries to try (default: 3)
+        max_urls_per_query: Maximum URLs to verify per query (default: 2)
         min_confidence: Minimum confidence score to accept (default: 0.7)
 
-    Returns True if processed successfully, False if failed.
+    Returns:
+        True if processed successfully, False if failed
     """
     company_name = row.get("Company") or ""
 
@@ -1092,16 +1089,31 @@ def process_company(
         return False
 
 
-def save_results(data, output_file):
+def save_results(data: List[Dict[str, Any]], output_file: str) -> None:
     """
-    Save the processed data to Excel file.
+    Save processed data to Excel file.
+
+    Args:
+        data: List of company data dictionaries
+        output_file: Path to output Excel file
     """
-    pl.DataFrame(data).write_excel(output_file)
+    try:
+        pl.DataFrame(data).write_excel(output_file)
+    except Exception as e:
+        logging.error(f"Failed to save results to {output_file}: {e}")
+        raise
 
 
-def should_skip_row(row, skip_filled=True):
+def should_skip_row(row: Dict[str, Any], skip_filled: bool = True) -> bool:
     """
     Determine if a row should be skipped based on existing data.
+
+    Args:
+        row: Company data row
+        skip_filled: Whether to skip rows with existing Homepage URL
+
+    Returns:
+        True if row should be skipped, False otherwise
     """
     if not skip_filled:
         return False
@@ -1124,10 +1136,7 @@ def main(
     search_language=None,
     max_queries=3,
     max_urls_per_query=2,
-    min_confidence=0.7,
-    enable_cache=True,
-    enable_disk_cache=False,
-    cache_size=1000,
+    min_confidence=0.7
 ):
     """
     Main execution function with configurable parameters.
@@ -1357,13 +1366,13 @@ if __name__ == "__main__":
 
     # BALANCED MODE (Default - good quality/speed tradeoff)
     # Estimated: ~3-4 hours for 1800 rows
-    # main(
-    #     max_queries=3,
-    #     max_urls_per_query=2,
-    #     min_confidence=0.7,
-    #     rate_limit=0.5,
-    #     save_interval=10
-    # )
+    main(
+        max_queries=3,
+        max_urls_per_query=2,
+        min_confidence=0.7,
+        rate_limit=0.5,
+        save_interval=10
+    )
 
     # THOROUGH MODE (Best quality, slower)
     # Estimated: ~5-7 hours for 1800 rows
@@ -1390,16 +1399,8 @@ if __name__ == "__main__":
 
     # ========== COMMON USE CASES ==========
 
-    # Test first 10 rows with FAST mode and caching
-    main(
-        start_row=705,
-        end_row=1763,
-        max_queries=2,
-        max_urls_per_query=1,
-        rate_limit=0.2,
-        enable_cache=True,  # Caching enabled
-        enable_disk_cache=False,  # In-memory only for testing
-    )
+    # Test first 10 rows with FAST mode
+    main(start_row=705, end_row=1763, max_queries=2, max_urls_per_query=1, rate_limit=0.2)
 
     # Process specific range (e.g., rows 100-200)
     # main(start_row=100, end_row=200)
