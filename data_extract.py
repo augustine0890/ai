@@ -1,17 +1,53 @@
 """
-Data Extraction Script for Company Information Enrichment
+Company Information Enrichment and Data Extraction System
 
-This script enriches company data by:
-1. Searching for official company websites using Serper API
-2. Scraping website content with Trafilatura
-3. Verifying website relevance to AI/tech industries
-4. Extracting structured information using Google Gemini AI
+This automated data enrichment pipeline processes company datasets to extract and verify
+comprehensive information about AI/technology companies. The system combines web search,
+content scraping, AI-powered verification, and structured data extraction.
 
-Features:
-- Progress tracking and checkpointing
-- Batch processing with configurable speed profiles
-- Resume capability after interruptions
-- Comprehensive logging
+Core Workflow:
+1. **Search Phase**: Uses Serper.dev API to find official company websites through
+   intelligent, AI-focused search queries with fallback strategies
+2. **Scraping Phase**: Extracts clean text content from websites using Trafilatura,
+   handling various HTML structures and content types
+3. **Verification Phase**: Employs Google Gemini AI to verify website relevance to
+   the company and AI/tech industry, with confidence scoring
+4. **Extraction Phase**: Uses Gemini AI to extract structured information (location,
+   contact email, products/services) from verified websites
+
+Key Features:
+- **Intelligent Caching**: LRU-based memory cache with optional disk persistence to
+  minimize API calls and improve performance across runs
+- **Progress Tracking**: Automatic checkpointing allows resuming after interruptions
+  without losing progress
+- **Batch Processing**: Configurable speed profiles (FAST/BALANCED/THOROUGH) for
+  different dataset sizes and quality requirements
+- **Multi-day Support**: Continue mode preserves previous results, enabling processing
+  large datasets over multiple sessions
+- **Comprehensive Logging**: Detailed logs with timestamps for debugging and monitoring
+- **Error Handling**: Robust error recovery with emergency save capabilities
+- **Performance Monitoring**: Cache statistics and hit rates for optimization insights
+
+Target Use Cases:
+- Enriching company databases with verified website information
+- Building AI/tech company directories with structured data
+- Validating and categorizing companies by AI technology focus
+- Batch processing large datasets (100s-1000s of companies)
+
+Performance:
+- FAST mode: ~3-6 seconds per company (recommended for 1000+ companies)
+- BALANCED mode: ~6-8 seconds per company (default, good quality/speed)
+- THOROUGH mode: ~10-14 seconds per company (maximum accuracy)
+
+Requirements:
+- SERPER_API_KEY: For Google search via Serper.dev
+- GEMINI_API_KEY: For AI-powered verification and extraction
+- Input: Excel/CSV file with company names (optional: PIC, ROO fields)
+- Output: Enriched Excel file with Homepage URL, Area, Application, Email
+
+Author: Data Enrichment Team
+Version: 2.0
+Last Updated: 2026-01-22
 """
 
 import polars as pl
@@ -61,8 +97,24 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 def setup_logging():
     """
-    Set up logging to both console and file in logs directory.
-    Returns the logger instance.
+    Initialize comprehensive logging system with file and console output.
+    
+    Creates a timestamped log file in the logs directory and configures
+    logging to write to both the file and console simultaneously. This
+    ensures all processing steps, errors, and statistics are captured
+    for debugging and monitoring purposes.
+    
+    The log format includes timestamp, log level, and message for easy
+    parsing and analysis. All logs use UTF-8 encoding to support
+    international characters in company names and addresses.
+    
+    Returns:
+        logging.Logger: Configured logger instance for the module
+        
+    Side Effects:
+        - Creates 'logs' directory if it doesn't exist
+        - Creates new log file with format: data_extract_YYYYMMDD_HHMMSS.log
+        - Configures global logging settings
     """
     # Create logs directory if it doesn't exist
     Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
@@ -88,7 +140,22 @@ def setup_logging():
 
 def save_checkpoint(processed_rows, total_rows, last_row_index):
     """
-    Save progress checkpoint to resume later if needed.
+    Persist processing progress to enable resumption after interruptions.
+    
+    Creates a JSON checkpoint file containing the current processing state,
+    allowing the script to resume from the last processed row if interrupted
+    by errors, user cancellation, or system issues. This prevents data loss
+    and avoids reprocessing already completed rows.
+    
+    Args:
+        processed_rows (int): Number of rows successfully processed so far
+        total_rows (int): Total number of rows in the current batch
+        last_row_index (int): Zero-based index of the last processed row
+        
+    Side Effects:
+        - Creates 'data' directory if it doesn't exist
+        - Writes/overwrites progress_checkpoint.json file
+        - Includes ISO format timestamp for tracking
     """
     checkpoint = {
         "timestamp": datetime.now().isoformat(),
@@ -106,8 +173,23 @@ def save_checkpoint(processed_rows, total_rows, last_row_index):
 
 def load_checkpoint():
     """
-    Load the last checkpoint if it exists.
-    Returns the checkpoint dict or None.
+    Retrieve saved processing progress from previous run.
+    
+    Attempts to load the checkpoint file created by save_checkpoint().
+    If the file exists and is valid JSON, returns the checkpoint data
+    to allow resuming from the last processed row. If the file doesn't
+    exist or is corrupted, returns None to start from the beginning.
+    
+    Returns:
+        dict or None: Checkpoint data containing:
+            - timestamp (str): ISO format timestamp of last save
+            - processed_rows (int): Number of rows processed
+            - total_rows (int): Total rows in batch
+            - last_row_index (int): Last processed row index
+        Returns None if no valid checkpoint exists
+        
+    Note:
+        Logs a warning if checkpoint file exists but cannot be loaded
     """
     if os.path.exists(PROGRESS_FILE):
         try:
@@ -121,7 +203,16 @@ def load_checkpoint():
 
 def clear_checkpoint():
     """
-    Clear the checkpoint file after successful completion.
+    Remove checkpoint file after successful processing completion.
+    
+    Deletes the progress checkpoint file once all rows have been
+    successfully processed. This prevents accidentally resuming
+    from an old checkpoint on the next run.
+    
+    Side Effects:
+        - Deletes progress_checkpoint.json if it exists
+        - Logs info message when checkpoint is cleared
+        - Silently succeeds if file doesn't exist
     """
     if os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
@@ -132,7 +223,28 @@ def clear_checkpoint():
 
 
 class CacheStats:
-    """Track cache hit/miss statistics for performance monitoring."""
+    """
+    Performance monitoring for caching system with detailed hit/miss tracking.
+    
+    Tracks cache effectiveness across all four cache types (search, scrape,
+    verification, extraction) to provide insights into API call savings and
+    cache efficiency. Used for performance optimization and cost analysis.
+    
+    Attributes:
+        search_hits (int): Number of search results served from cache
+        search_misses (int): Number of search API calls made
+        scrape_hits (int): Number of website contents served from cache
+        scrape_misses (int): Number of websites scraped
+        verification_hits (int): Number of verifications served from cache
+        verification_misses (int): Number of Gemini verification API calls
+        extraction_hits (int): Number of extractions served from cache
+        extraction_misses (int): Number of Gemini extraction API calls
+        
+    Methods:
+        get_*_hit_rate(): Calculate hit rate percentage for each cache type
+        get_total_api_calls_saved(): Calculate total API calls avoided
+        print_stats(): Output formatted statistics to logger
+    """
 
     def __init__(self):
         self.search_hits = 0
@@ -211,8 +323,31 @@ class CacheStats:
 
 class LRUCache:
     """
-    LRU (Least Recently Used) cache with optional size limit.
-    Prevents memory issues with large datasets by evicting old entries.
+    Least Recently Used (LRU) cache implementation with automatic eviction.
+    
+    Implements an LRU caching strategy using OrderedDict to maintain access
+    order. When the cache reaches its maximum size, the least recently used
+    entry is automatically evicted to make room for new entries. This prevents
+    unbounded memory growth while maintaining frequently accessed data.
+    
+    The LRU strategy is ideal for this use case because:
+    - Companies may appear multiple times in the dataset
+    - Recent searches are more likely to be reused
+    - Memory usage remains bounded even for large datasets
+    
+    Args:
+        max_size (int): Maximum number of entries before eviction starts.
+            Default is 1000 entries. Adjust based on available memory.
+            
+    Attributes:
+        cache (OrderedDict): Ordered dictionary maintaining insertion/access order
+        max_size (int): Maximum cache capacity
+        
+    Methods:
+        get(key): Retrieve value and mark as recently used
+        set(key, value): Store value and evict oldest if needed
+        clear(): Remove all entries
+        size(): Get current number of entries
     """
 
     def __init__(self, max_size: int = 1000):
@@ -249,8 +384,43 @@ class LRUCache:
 
 class DataCache:
     """
-    Main caching system for search results, web scraping, and AI extractions.
-    Supports both in-memory and optional persistent disk caching.
+    Comprehensive multi-level caching system for API results and web content.
+    
+    Provides intelligent caching across all four stages of the enrichment pipeline:
+    1. Search results from Serper API
+    2. Scraped website content from Trafilatura
+    3. Website relevance verification from Gemini AI
+    4. Company information extraction from Gemini AI
+    
+    Features:
+    - **Separate LRU Caches**: Each data type has its own cache with appropriate
+      sizing (search/scrape get full size, verification/extraction get half)
+    - **Hash-based Keys**: Uses MD5 hashing of parameters for consistent lookups
+    - **Pydantic Conversion**: Automatically converts Pydantic models to dicts
+      for JSON serialization
+    - **Disk Persistence**: Optional save/load from JSON file for cross-run caching
+    - **Statistics Tracking**: Monitors hit/miss rates for performance analysis
+    
+    Cache Sizing Strategy:
+    - Search cache: Full size (most likely to be reused)
+    - Scrape cache: Full size (expensive to re-fetch)
+    - Verification cache: Half size (less likely to be reused)
+    - Extraction cache: Half size (less likely to be reused)
+    
+    Args:
+        enable_disk_cache (bool): Whether to persist cache to disk between runs.
+            Recommended for multi-day batch processing. Default: False
+        cache_file (str): Path to JSON file for persistent storage.
+            Default: 'data/cache.json'
+        max_memory_size (int): Maximum entries per full-size cache.
+            Default: 1000. Adjust based on available RAM.
+            
+    Attributes:
+        stats (CacheStats): Performance statistics tracker
+        search_cache (LRUCache): Cache for Serper search results
+        scrape_cache (LRUCache): Cache for scraped website content
+        verification_cache (LRUCache): Cache for Gemini verification results
+        extraction_cache (LRUCache): Cache for Gemini extraction results
     """
 
     def __init__(
@@ -471,14 +641,37 @@ def init_cache(
     enable_disk_cache: bool = False, max_memory_size: int = 1000
 ) -> DataCache:
     """
-    Initialize the global cache instance.
-
+    Initialize and configure the global caching system.
+    
+    Creates a singleton DataCache instance that will be used throughout
+    the script execution. This function should be called once at the
+    start of main() before any processing begins.
+    
+    The cache significantly improves performance by:
+    - Avoiding duplicate API calls for the same searches
+    - Preventing re-scraping of already visited websites
+    - Reusing AI verification and extraction results
+    - Reducing costs by minimizing API usage
+    
     Args:
-        enable_disk_cache: Whether to persist cache to disk
-        max_memory_size: Maximum entries in memory (LRU eviction)
-
+        enable_disk_cache (bool): If True, cache persists to disk and loads
+            on next run. Highly recommended for multi-day batch processing
+            or when processing datasets with duplicate companies. Default: False
+        max_memory_size (int): Maximum number of entries in each full-size
+            cache before LRU eviction begins. Larger values use more memory
+            but improve hit rates. Default: 1000
+            
     Returns:
-        Initialized DataCache instance
+        DataCache: Configured cache instance ready for use
+        
+    Side Effects:
+        - Sets global _cache variable
+        - Loads existing cache from disk if enable_disk_cache=True
+        - Logs cache initialization status
+        
+    Example:
+        >>> cache = init_cache(enable_disk_cache=True, max_memory_size=2000)
+        >>> # Cache is now available via get_cache() throughout the script
     """
     global _cache
     _cache = DataCache(
@@ -488,7 +681,24 @@ def init_cache(
 
 
 def clear_cache():
-    """Clear all caches and optionally delete cache file."""
+    """
+    Clear all in-memory caches and delete persistent cache file.
+    
+    Removes all cached data from memory and deletes the disk cache file
+    if it exists. Use this function to force fresh API calls for all
+    operations, typically for testing or when cache data is suspected
+    to be stale or corrupted.
+    
+    Side Effects:
+        - Clears all four LRU caches (search, scrape, verification, extraction)
+        - Deletes cache.json file if it exists
+        - Logs success/failure messages
+        - Resets cache statistics
+        
+    Warning:
+        This operation cannot be undone. All cached data will be lost
+        and subsequent operations will require fresh API calls.
+    """
     cache = get_cache()
     if cache:
         cache.clear_all()
@@ -508,6 +718,32 @@ def clear_cache():
 # ================= DATA MODELS =================
 
 class CompanyInfo(BaseModel):
+    """
+    Structured data model for extracted company information.
+    
+    Defines the schema for company data extracted by Gemini AI from
+    website content. Used with Pydantic for automatic validation and
+    JSON serialization. Gemini AI is instructed to extract these specific
+    fields from the website text.
+    
+    Attributes:
+        location (str): Physical address or location of the company.
+            Can be city, country, or full address. Examples:
+            - "Seoul, South Korea"
+            - "123 Tech Street, San Francisco, CA 94105"
+            - "Tokyo, Japan"
+        contact_email (str): Public contact email address found on website.
+            Typically info@, contact@, or sales@ addresses. Examples:
+            - "info@company.com"
+            - "contact@example.co.kr"
+        application_service (str): Name of main product, service, or application.
+            The primary offering of the company. Examples:
+            - "Industrial Robot Control System"
+            - "AI-powered Vision Inspection Platform"
+            - "Autonomous Mobile Robot (AMR)"
+        homepage_url (str): The official website URL that was analyzed.
+            Full URL including protocol. Example: "https://company.com"
+    """
     location: str = Field(..., description="Physical address or location of the company")
     contact_email: str = Field(..., description="Contact email address found on the page")
     application_service: str = Field(..., description="Name of main application, service, or product")
@@ -515,6 +751,38 @@ class CompanyInfo(BaseModel):
 
 
 class WebsiteRelevance(BaseModel):
+    """
+    Structured verification result for website relevance assessment.
+    
+    Defines the schema for Gemini AI's analysis of whether a website
+    belongs to the target company and operates in the AI/tech industry.
+    Includes confidence scoring and categorization for quality control.
+    
+    Attributes:
+        is_relevant (bool): True if website belongs to the company AND
+            the company operates in AI/tech industry. Both conditions
+            must be met. False otherwise.
+        relevance_category (str): Primary AI/tech category. One of:
+            - "Robotics and Automation AI": Physical robots, control systems
+            - "Vision AI": Image recognition, computer vision
+            - "AI Software and Platform": AI tools, APIs, development platforms
+            - "Smart Factory and Manufacturing AI": Production optimization
+            - "Logistics and Mobility AI": Autonomous vehicles, route optimization
+            - "Service/Education/Healthcare AI": Chatbots, medical AI
+            - "AI Semiconductor and Hardware": AI chips, edge devices
+            - "Not Relevant": Not AI/tech or wrong company
+        confidence_score (float): Confidence level from 0.0 to 1.0.
+            Higher scores indicate stronger evidence. Typical thresholds:
+            - 0.9-1.0: Very high confidence
+            - 0.7-0.9: Good confidence (default minimum)
+            - 0.5-0.7: Moderate confidence
+            - 0.0-0.5: Low confidence
+        reason (str): Brief explanation for the decision, citing specific
+            keywords or evidence found on the website. Examples:
+            - "Website mentions 'industrial robots' and 'automation systems'"
+            - "Different company - this is a news site about the company"
+            - "No AI/tech focus - appears to be a consulting firm"
+    """
     is_relevant: bool = Field(..., description="Whether the website is relevant to the company and AI/tech industry")
     relevance_category: str = Field(..., description="Primary category: 'Robotics and Automation AI', 'Vision AI', 'AI Software and Platform', 'Smart Factory and Manufacturing AI', 'Logistics and Mobility AI', 'Service/Education/Healthcare AI', 'AI Semiconductor and Hardware', or 'Not Relevant'")
     confidence_score: float = Field(..., description="Confidence score from 0.0 to 1.0")
