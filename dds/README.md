@@ -147,7 +147,14 @@ We built a robust, custom `editorjs_to_html_and_text` parser from scratch. This 
 
 ## Setup
 
-From the `dds` folder:
+1. **Install uv**
+   If you don't have `uv` installed yet:
+   - Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+   - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+     *(On macOS, you can also use `brew install uv`)*
+
+2. **Sync dependencies**
+   From the `dds` folder, run:
 
 ```bash
 uv sync
@@ -223,6 +230,20 @@ ffmpeg -version
 ```
 
 If `ffmpeg` is not recognized, close and reopen terminal and run verify again.
+
+### macOS
+
+Install with [Homebrew](https://brew.sh/):
+
+```bash
+brew install ffmpeg
+```
+
+Verify:
+
+```bash
+ffmpeg -version
+```
 
 ### Python fallback (already supported in this project)
 
