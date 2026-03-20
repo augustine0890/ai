@@ -67,6 +67,9 @@ local_settings.py
 # Data
 data
 
+# Secrets and local config
+dds/input.json
+
 # Go build artifacts and temporary files
 compress/compress
 compress/compress.exe

@@ -1,0 +1,12 @@
+{
+    "course_url": "https://learn.365datascience.com/courses/preview/web-scraping-and-api-fundamentals-in-python/",
+    "authorization_token": "<YOUR_BEARER_TOKEN>",
+    "policy_key": "<YOUR_BRIGHTCOVE_POLICY_KEY>",
+    "quality": "1080p",
+    "base_url": "https://learn.365datascience.com/",
+    "courses_collector_path": "courses",
+    "course_urls": [
+        "https://learn.365datascience.com/courses/preview/sql/",
+        "https://learn.365datascience.com/courses/python/"
+    ]
+}

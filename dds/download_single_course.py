@@ -1,12 +1,15 @@
 import json
+import shutil
 import string
+import subprocess
 import urllib.request
 from pathlib import Path
-from typing import List
+from typing import Any, List, cast
 
 import requests
 import yt_dlp
-from course_model import CourseModel
+import imageio_ffmpeg
+from course_model import CourseModel, VideoItem
 from video_model import VideoModel
 
 
@@ -14,24 +17,57 @@ def normalize_name(name: str) -> str:
     return name.translate(str.maketrans("", "", string.punctuation))
 
 
-def download_video_from_stream_url(video_stream_url: str, filepath: str, quality: str) -> None:
+def download_video_from_stream_url(
+    video_stream_url: str, filepath: str, quality: str
+) -> None:
     """Download a video from stream url
     :param video_stream_url: stream url
     :param filepath: file path where to download
     :param quality: quality to select
     """
-    ydl_opts = {
-        "format": f"bestvideo[height<={quality[:-1]}]+bestaudio/best[height<={quality[:-1]}]/best",
+    quality_limit = "".join(ch for ch in quality if ch.isdigit()) or "1080"
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        try:
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_exe = None
+
+    ffmpeg_ready = False
+    if ffmpeg_exe:
+        try:
+            subprocess.run(
+                [ffmpeg_exe, "-version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            ffmpeg_ready = True
+        except Exception:
+            ffmpeg_ready = False
+
+    ydl_opts: dict[str, Any] = {
         "concurrent_fragment_downloads": 15,
         "outtmpl": f"{filepath}.%(ext)s",
-        "postprocessors": [{"key": "FFmpegFixupM3u8"}],
         "writesubtitles": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download(video_stream_url)
+
+    if ffmpeg_ready and ffmpeg_exe:
+        ydl_opts["format"] = (
+            f"bestvideo[height<={quality_limit}]+bestaudio/"
+            f"best[height<={quality_limit}]/best"
+        )
+        ydl_opts["postprocessors"] = [{"key": "FFmpegFixupM3u8"}]
+        ydl_opts["ffmpeg_location"] = ffmpeg_exe
+    else:
+        ydl_opts["format"] = f"best[height<={quality_limit}]/best"
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # pyright: ignore[reportArgumentType]
+        ydl.download([video_stream_url])
 
 
-def request_365datascience_course_api(course_slug: str, authorization_token: str) -> CourseModel:
+def request_365datascience_course_api(
+    course_slug: str, authorization_token: str
+) -> CourseModel:
     course_api_url = f"https://api.365datascience.com/courses/{course_slug}/player"
     headers_for_365datascience = {
         "authority": "api.365datascience.com",
@@ -46,7 +82,9 @@ def request_365datascience_course_api(course_slug: str, authorization_token: str
     return CourseModel.parse_raw(response.text)
 
 
-def request_365datascience_course_resource_api(course_slug: str, course_id: int, authorization_token: str) -> List[str]:
+def request_365datascience_course_resource_api(
+    course_slug: str, course_id: int, authorization_token: str
+) -> List[str]:
     # TODO: Extract common code from here and request_365datascience_course_api function
     course_resource_api_url = f"https://api.365datascience.com/courses/file"
     headers_for_365datascience = {
@@ -64,9 +102,13 @@ def request_365datascience_course_resource_api(course_slug: str, course_id: int,
         "courseZip": True,
     }
 
-    response = requests.post(course_resource_api_url, headers=headers_for_365datascience, json=json_data)
+    response = requests.post(
+        course_resource_api_url, headers=headers_for_365datascience, json=json_data
+    )
+    if response.status_code in (400, 404):
+        return []
     response.raise_for_status()
-    return json.loads(response.text)
+    return cast(List[str], json.loads(response.text))
 
 
 def request_brightcove_api(video_id: str, policy_key: str) -> VideoModel:
@@ -84,7 +126,9 @@ def request_brightcove_api(video_id: str, policy_key: str) -> VideoModel:
     return VideoModel.parse_raw(response.text)
 
 
-def download_course(course_url: str, authorization_token: str, policy_key: str, quality: str) -> None:
+def download_course(
+    course_url: str, authorization_token: str, policy_key: str, quality: str
+) -> None:
     course_slug = course_url.strip("/").split("/").pop()
     course_data = request_365datascience_course_api(course_slug, authorization_token)
 
@@ -98,16 +142,22 @@ def download_course(course_url: str, authorization_token: str, policy_key: str, 
                     / f"{i} - {normalize_name(section.name)}"
                     / f"{j} - {normalize_name(asset.name)}"
                 )
-                video_data = request_brightcove_api(asset.video.ext_id, policy_key)
+                if asset.video is None or isinstance(asset.video, bool):
+                    continue
+
+                video_item = cast(VideoItem, asset.video)
+                video_data = request_brightcove_api(video_item.ext_id, policy_key)
                 source = video_data.sources.pop(0)
                 master_m3u8_url = source.src
-                download_video_from_stream_url(master_m3u8_url, file_path, quality)
+                download_video_from_stream_url(master_m3u8_url, str(file_path), quality)
 
 
 def download_course_resource(course_url: str, authorization_token: str) -> None:
     course_slug = course_url.strip("/").split("/").pop()
     course_data = request_365datascience_course_api(course_slug, authorization_token)
-    course_resource_urls = request_365datascience_course_resource_api(course_slug, course_data.id, authorization_token)
+    course_resource_urls = request_365datascience_course_resource_api(
+        course_slug, course_data.id, authorization_token
+    )
 
     for i, course_resource_url in enumerate(course_resource_urls):
         file_path = (
@@ -128,7 +178,12 @@ if __name__ == "__main__":
     authorization_token = input_data.get("authorization_token")
     policy_key = input_data.get("policy_key")
     quality = input_data.get("quality")
-    download_course_resource(course_url=course_url, authorization_token=authorization_token)
+    download_course_resource(
+        course_url=course_url, authorization_token=authorization_token
+    )
     download_course(
-        course_url=course_url, authorization_token=authorization_token, policy_key=policy_key, quality=quality
+        course_url=course_url,
+        authorization_token=authorization_token,
+        policy_key=policy_key,
+        quality=quality,
     )

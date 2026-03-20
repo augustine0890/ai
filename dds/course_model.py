@@ -65,7 +65,7 @@ class Next(BaseModel):
     class Config:
         allow_population_by_field_name = True
 
-    asset: Asset
+    asset: Optional[Union[Asset, bool]] = None
 
 
 class Asset(BaseModel):
@@ -80,7 +80,7 @@ class Asset(BaseModel):
     review: Optional[bool] = None
     free: bool
     duration: Optional[int] = None
-    completed: Union[bool, int]
+    completed: Optional[Union[bool, int]] = None
     unlocked: Optional[bool] = None
     useful_or_not: Optional[bool] = Field(None, alias="usefulOrNot")
     video: Optional[Union[bool, VideoItem]] = None
@@ -103,11 +103,11 @@ class Section(BaseModel):
         allow_population_by_field_name = True
 
     order: int
-    id: int
+    id: Optional[int] = None
     name: str
-    free: bool
+    free: Optional[bool] = None
     duration: int
-    completed: bool
+    completed: Optional[bool] = None
     progress: Progress
     assets: List[Asset]
 
