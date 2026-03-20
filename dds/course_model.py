@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -78,9 +78,9 @@ class Asset(BaseModel):
     slug: str
     name: str
     review: Optional[bool] = None
-    free: bool
+    free: Optional[bool] = None
     duration: Optional[int] = None
-    completed: Optional[Union[bool, int]] = None
+    completed: Optional[Any] = None
     unlocked: Optional[bool] = None
     useful_or_not: Optional[bool] = Field(None, alias="usefulOrNot")
     video: Optional[Union[bool, VideoItem]] = None

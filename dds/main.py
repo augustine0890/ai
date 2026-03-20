@@ -1,4 +1,5 @@
 import json
+import datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -7,9 +8,33 @@ import requests
 from bs4 import BeautifulSoup  # pyright: ignore[reportMissingImports]
 
 from download_single_course import download_course, download_course_resource
+from clean_downloaded_files import clean_directory
 
 
 REQUEST_TIMEOUT_SECONDS = 20
+
+
+def log_event(event: str, **fields: Any) -> None:
+    # 1. Human-readable console trace
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    human_parts = [f"[{now}]", "[dds.main]", f"event={event}"]
+    
+    # 2. Structured LLM-friendly trace dictionary
+    trace: dict[str, Any] = {"timestamp": now, "module": "dds.main", "event": event}
+
+    for key, value in fields.items():
+        human_parts.append(f"{key}={value!r}")
+        trace[key] = str(value) if isinstance(value, (Path, Exception)) else value
+
+    print(" ".join(human_parts))
+    
+    # 3. Append to JSONL file for machine parsing
+    trace_path = Path(__file__).parent / "trace.jsonl"
+    try:
+        with trace_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(trace) + "\n")
+    except Exception:
+        pass
 
 
 def load_input_data(input_file: Path) -> dict[str, Any]:
@@ -99,18 +124,27 @@ if __name__ == "__main__":
     # Main flow: validate config -> discover URLs -> process each course independently.
     input_file = Path(__file__).parent / "input.json"
     input_data = load_input_data(input_file)
+    log_event("config_loaded", input_file=str(input_file))
 
     base_url = input_data.get("base_url", "https://learn.365datascience.com/")
     courses_collector_path = input_data.get("courses_collector_path", "courses")
     courses_collector_url = urljoin(base_url, courses_collector_path)
+    log_event("course_discovery_start", collector_url=courses_collector_url)
 
     page = requests.get(courses_collector_url, timeout=REQUEST_TIMEOUT_SECONDS)
     page.raise_for_status()
+    log_event(
+        "course_discovery_http_ok",
+        status_code=page.status_code,
+        final_url=page.url,
+    )
     soup = BeautifulSoup(page.content, "html.parser")
     all_course_link = extract_course_links(soup, base_url)
+    log_event("course_links_extracted", count=len(all_course_link), source="page")
 
     if not all_course_link:
         all_course_link = get_course_links_from_input(input_data)
+        log_event("course_links_extracted", count=len(all_course_link), source="input")
 
     if not all_course_link:
         raise RuntimeError(
@@ -121,9 +155,16 @@ if __name__ == "__main__":
     authorization_token = cast(str, input_data["authorization_token"])
     policy_key = cast(str, input_data["policy_key"])
     quality = cast(str, input_data["quality"])
+    log_event("download_batch_start", courses=len(all_course_link), quality=quality)
 
-    for course_url in all_course_link:
+    for index, course_url in enumerate(all_course_link, start=1):
         try:
+            log_event(
+                "course_start",
+                index=index,
+                total=len(all_course_link),
+                course_url=course_url,
+            )
             # Resources and videos are separated because some courses expose only one of them.
             download_course_resource(
                 course_url=course_url, authorization_token=authorization_token
@@ -134,6 +175,20 @@ if __name__ == "__main__":
                 policy_key=policy_key,
                 quality=quality,
             )
+            log_event("course_done", index=index, course_url=course_url)
         except Exception as exc:
             # Continue batch processing on per-course failures.
+            log_event(
+                "course_error", index=index, course_url=course_url, error=str(exc)
+            )
             print(f"Failed to download course {course_url}: {exc}")
+
+    # Final pass: clean up any files that were downloaded with raw stringified EditorJS JSON
+    downloads_dir = Path.home() / "Downloads" / "365DataScience"
+    if downloads_dir.exists():
+        log_event("cleanup_start", directory=str(downloads_dir))
+        try:
+            cleaned = clean_directory(downloads_dir)
+            log_event("cleanup_done", cleaned_files=cleaned)
+        except Exception as exc:
+            log_event("cleanup_error", error=str(exc))
