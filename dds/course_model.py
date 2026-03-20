@@ -45,12 +45,12 @@ class VideoItem(BaseModel):
     class Config:
         allow_population_by_field_name = True
 
-    name: str
-    ext_id: str = Field(..., alias="extId")
-    provider: str
-    duration: int
-    duration_seconds: float = Field(..., alias="durationSeconds")
-    id: int
+    name: Optional[str] = None
+    ext_id: Optional[str] = Field(None, alias="extId")
+    provider: Optional[str] = None
+    duration: Optional[int] = None
+    duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
+    id: Optional[int] = None
 
 
 class Downloadable(BaseModel):
