@@ -1,340 +1,840 @@
-# dds
+# dds — 365 Data Science Course Downloader
 
-Simple Python downloader utilities for 365 Data Science course content.
+A Python CLI tool that downloads videos, text lessons (HTML + TXT), and resource ZIPs from [365datascience.com](https://learn.365datascience.com) and [365financialanalyst.com](https://learn.365financialanalyst.com).
 
-This project includes:
+---
 
-- `main.py`: crawls the course listing page and tries to download all discovered courses.
-- `download_single_course.py`: downloads videos, text lessons (HTML/TXT), and resources for a course.
-- `clean_downloaded_files.py`: post-processes downloaded HTML/TXT files to clean embedded Editor.js JSON payloads.
-- `course_model.py` and `video_model.py`: Pydantic models for API responses.
+## Table of Contents
 
-## Technical architecture
+1. [Requirements](#requirements)
+2. [Setup](#setup)
+3. [Configuring input.json](#configuring-inputjson)
+   - [All fields reference](#all-fields-reference)
+   - [How to get authorization\_token](#how-to-get-authorization_token)
+   - [How to get policy\_key](#how-to-get-policy_key)
+   - [How to get course\_url](#how-to-get-course_url)
+4. [Running the downloader](#running-the-downloader)
+5. [Token expiry mid-run](#token-expiry-mid-run)
+6. [Output structure](#output-structure)
+7. [FFmpeg installation](#ffmpeg-installation)
+8. [Logs and debugging](#logs-and-debugging)
+9. [Troubleshooting](#troubleshooting)
+10. [Technical architecture](#technical-architecture)
 
-### Main-file component diagram (`main.py`)
-
-```text
-input.json
-   |
-   v
-load_input_data()
-   |
-   v
-fetch courses page -----------------------------+
-   |                                            |
-   v                                            |
-extract_course_links()                          |
-   |                                            |
-   +-- empty? --> get_course_links_from_input() |
-                  (course_url / course_urls)    |
-                                                |
-validated all_course_link <---------------------+
-   |
-   v
-for each course_url
-   |-
-   |  download_course_resource()
-   |    -> request_course_api()
-   |    -> request_course_resource_api()
-   |
-   |  download_course()
-   |    -> request_course_api()
-   |    -> request_brightcove_api()
-   |    -> download_video_from_stream_url()
-   |    -> fetch_text_lesson_content()   # /course/text/{asset_id}
-   |    -> save_html_asset() + .txt export
-   |
-   +-> per-course try/except (continue on failure)
-   |
-   +-> clean_directory() post-pass for malformed HTML/TXT
-```
-
-### Why this design works well
-
-- `main.py` is orchestration-only: it validates input, discovers course URLs, and coordinates per-course execution.
-- API details and download logic stay in `download_single_course.py`, keeping responsibilities separated.
-- Link fallback (`course_url` / `course_urls`) makes the script robust when the listing page is login-gated.
-- Per-course exception isolation allows batch runs without stopping on one bad course.
-
-### High-level flow
-
-1. `main.py` loads `input.json` and validates required auth/config fields.
-2. It fetches the course listing page and extracts candidate course links.
-3. It filters links to valid course URL shapes and falls back to `course_url` / `course_urls` from `input.json` when scraping returns nothing.
-4. For each course URL, it calls:
-   - `download_course_resource(...)` to fetch downloadable zip resources (if available), then
-   - `download_course(...)` to fetch and download lesson videos and text lessons.
-5. Text lessons are fetched from the player payload and `/course/text/{asset_id}` fallback, then saved as `.html` and `.txt`.
-6. A cleanup pass normalizes any files that still contain raw stringified Editor.js payloads.
-7. Per-course failures are isolated so one broken course does not stop the whole run.
-
-### API integration points
-
-- Course player API (domain-aware):
-  - `GET https://api.365datascience.com/courses/{course_slug}/player`
-  - `GET https://api.365financialanalyst.com/courses/{course_slug}/player`
-  - Parsed into `CourseModel` (`course_model.py`)
-- Course resource API (domain-aware):
-  - `POST https://api.365datascience.com/courses/file`
-  - `POST https://api.365financialanalyst.com/courses/file`
-  - Returns zip URLs for some courses
-  - `400/404` and `5xx` are treated as "no resources available" (skip resource download, continue course)
-- Brightcove playback API:
-  - `GET https://edge.api.brightcove.com/playback/v1/accounts/6258000438001/videos/{video_id}`
-  - Parsed into `VideoModel` (`video_model.py`)
-- Text lesson API (primary for non-video lessons):
-  - `GET {api_base_url}/course/text/{asset_id}`
-  - Returns Editor.js block JSON, converted to clean HTML and plain text
-- Lecture content fallback API (best effort):
-  - Multiple lecture endpoints are probed when both player payload and text API miss
-  - Used to recover additional HTML/text-only lessons
-
-### Download engine behavior
-
-- Video downloads use `yt-dlp`.
-- If FFmpeg is available, downloader requests split formats (`bestvideo+bestaudio`) and merges/fixes streams.
-- If FFmpeg is not available, downloader falls back to single-stream format (`best`) to avoid merge failure.
-- Text/non-video lessons are exported as both `.html` and `.txt`.
-- Text extraction order is: player payload -> `/course/text/{asset_id}` -> lecture endpoint fallback.
-- `main.py` runs a cleanup pass (`clean_downloaded_files.clean_directory`) after downloads.
-- Downloaded files are written to `~/Downloads/365DataScience/...`.
-
-### Logging format (LLM-friendly)
-
-- Logs are structured as key/value events, e.g.:
-  - `[2026-03-20T09:10:00+00:00] [dds.main] event=course_start index=1 total=3 course_url='...'`
-  - `[2026-03-20T09:10:02+00:00] [dds.worker] event=lesson_content_txt_done filepath='...'`
-- Prefixes:
-  - `[dds.main]` orchestration and batch-level flow
-  - `[dds.worker]` per-course API/download internals
-- Every event is also appended to `trace.jsonl` for machine/LLM parsing.
-
-## Technical Deep Dive: The Text Extraction & Formatting Journey
-
-Extracting the non-video (text/HTML) lessons proved to be the most challenging part of this project. Here is the technical breakdown of what we discovered and how we solved it:
-
-### 1. The Editor.js payload and the "Ugly JSON" problem
-**What happened:** Initially, downloading text lessons resulted in HTML files that were basically unreadable on the screen. The content was displayed as raw, stringified JSON such as `[{"id":"8DSOgugSaE", "type":"header", ...}]`.
-**Why it happened:** The 365 platform does not serve pre-rendered HTML for its reading lessons. Instead, it serves structured blocks created by the **Editor.js** framework. To make things worse, sometimes the platform's API returns this array of blocks cleanly, and other times it returns them as a *heavily stringified* JSON string nested inside fallback objects. When our initial universal parsing tool (`_collect_all_strings`) tried to scrape the text, it encountered the stringified JSON and naively output it directly inside a `<p>` tag, creating the ugly output.
-**How we fixed it:** 
-We built a robust, custom `editorjs_to_html_and_text` parser from scratch. This parser:
-- Detects stringified payloads and defensively un-strings them (`json.loads()`).
-- Iterates over blocks and maps specific Editor.js block types (`header`, `paragraph`, `listUnordered`, `listOrdered`, `quote`, `table`, `image`, `checklist`) into carefully structured HTML fragments.
-- Accumulates consecutive per-item list blocks into correctly grouped `<ul>` or `<ol>` elements.
-
-### 2. Beautiful HTML styling
-**What happened:** The initial parser output was mathematically correct but visually drab (Times New Roman, no margins, visually exhausting to read).
-**How we fixed it:** We upgraded `save_html_asset()` to wrap the generated fragments in a modern, responsive HTML5 boilerplate. It features:
-- **Inter** typeface (via Google Fonts).
-- A centered "card" layout with rounded corners and a soft drop-shadow.
-- Custom CSS for complex blocks like zebra-striped tables, quote blocks matching the UI, interactive checklists (`☐` / `☑`), and highlighted "Learning Objectives" containers with accent colors.
-- We also added a parallel Plain Text (`.txt`) generator that mimics the structure utilizing standard ASCII dividers (`═════` and `─────`) and indentation so local command-line users can read it naturally.
-
-### 3. The `Token Expired` block wall
-**What happened:** Mid-download, the text-extraction API (`/course/text/{asset_id}`) would randomly start skipping all lessons, throwing `400 Token provided is either invalid or expired`.
-**Why it happened:** The main video CDN (Brightcove) relies on a long-lived `policy_key`, but the text/metadata API uses a strict JWT `authorization_token` bound to the user's login session. These JWTs expire roughly **1 hour** after being issued. Because a video course download can easily take longer than an hour, the token expires mid-loop.
-**How we fixed it:** We introduced a global mutable state manager with a terminal prompt. If the API returns a 401/403 or "invalid" message mid-download, the script pauses execution, alerts you in the terminal (`⚠️ Token expired or invalid`), and waits for you to paste a new token from your browser. It then permanently updates your local `input.json` and resumes the loop exactly where it left off!
-
-### 4. The auto-cleaning `clean_downloaded_files` pass
-**What happened:** Even with the fixes in place, previously run downloads still contained the ugly stringified JSON files on disk. Expecting the user to find and delete these manually was a poor developer experience.
-**How we fixed it:** We created a cleanup module that uses Regex (`\[\s*\{.*\}\s*\]`) to hunt down and intercept any lingering stringified JSON blocks inside previously written `.html` or `.txt` files. We integrated this directly into `main.py` so that when a batch download completes, it does a final, silent sweep of the `Downloads` directory, automatically converting any legacy ugly files into gorgeous, newly-styled assets without making any additional network requests.
+---
 
 ## Requirements
 
-- Python 3.14+ (current project setting)
+- Python 3.14+
 - `uv` package manager
-- Valid 365 Data Science credentials/tokens
+- A valid 365 Data Science (or 365 Financial Analyst) account with access to the courses you want to download
+- FFmpeg (recommended, but there is an automatic Python fallback)
+
+---
 
 ## Setup
 
-1. **Install uv**
-   If you don't have `uv` installed yet:
-   - Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-   - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-     *(On macOS, you can also use `brew install uv`)*
+### 1. Install uv
 
-2. **Sync dependencies**
-   From the `dds` folder, run:
+| Platform | Command |
+|---|---|
+| macOS (Homebrew) | `brew install uv` |
+| macOS / Linux | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Windows | `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"` |
+
+### 2. Install dependencies
+
+From the `dds/` folder:
 
 ```bash
 uv sync
 ```
 
-This creates `.venv` and installs all dependencies from `pyproject.toml` / `uv.lock`.
+This creates `.venv` and installs all packages from `pyproject.toml`.
 
-## Configure input
-
-Create local config from the example, then edit:
+### 3. Create your config file
 
 ```bash
 cp input.example.json input.json
 ```
 
-Set required values in `input.json`:
+Then fill in `input.json` — see the next section for every field.
+
+---
+
+## Configuring input.json
+
+`input.json` is the single config file the downloader reads at startup. It is gitignored so your tokens never leave your machine.
+
+### Minimal example (single course)
 
 ```json
 {
-  "course_url": "https://learn.365datascience.com/courses/preview/web-scraping-and-api-fundamentals-in-python/",
-  "authorization_token": "<YOUR_BEARER_TOKEN>",
-  "policy_key": "<YOUR_BRIGHTCOVE_POLICY_KEY>",
-  "quality": "1080p"
+  "authorization_token": "eyJhbGci...",
+  "policy_key": "BCpkADawqM...",
+  "quality": "1080p",
+  "course_url": "https://learn.365datascience.com/courses/preview/python-programmer-bootcamp/"
 }
 ```
 
-Optional keys for `main.py`:
+### Full example (batch — all courses)
 
-- `base_url` (default: `https://learn.365datascience.com/`)
-- `courses_collector_path` (default: `courses`)
-- `course_urls` (optional list for batch input fallback)
-
-Supported course domains include:
-
-- `https://learn.365datascience.com/...`
-- `https://learn.365financialanalyst.com/...`
-
-Security note:
-
-- `dds/input.json` is gitignored and should contain real secrets only on your local machine.
-- Keep only placeholders in `dds/input.example.json`.
-
-## Run
-
-Download a single course:
-
-```bash
-uv run python download_single_course.py
+```json
+{
+  "authorization_token": "eyJhbGci...",
+  "policy_key": "BCpkADawqM...",
+  "quality": "1080p",
+  "base_url": "https://learn.365datascience.com/",
+  "courses_collector_path": "courses",
+  "course_urls": [
+    "https://learn.365datascience.com/courses/preview/sql/",
+    "https://learn.365datascience.com/courses/python/"
+  ]
+}
 ```
 
-Download all discovered courses from the listing page:
+---
+
+### All fields reference
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `authorization_token` | **Yes** | — | JWT Bearer token for the 365 API. Expires ~1 hour after login. |
+| `policy_key` | **Yes** | — | Brightcove playback policy key. Long-lived — rarely changes. |
+| `quality` | **Yes** | — | Preferred video resolution: `"1080p"`, `"720p"`, `"480p"`, `"360p"`. |
+| `course_url` | No | — | Single course URL. Used when `main.py` cannot scrape the listing page. |
+| `course_urls` | No | `[]` | List of course URLs. Same fallback purpose as `course_url`. |
+| `base_url` | No | `https://learn.365datascience.com/` | Base domain for the listing page scrape. |
+| `courses_collector_path` | No | `courses` | Path appended to `base_url` to find the all-courses listing page. |
+
+> `course_url` and `course_urls` are **fallbacks**. `main.py` first tries to scrape all course links from the listing page. If that page is login-gated or returns no links, it falls back to these fields.
+
+---
+
+### How to get `authorization_token`
+
+This is the JWT your browser sends to the 365 API. It expires roughly **1 hour** after you log in.
+
+**Steps:**
+
+1. Log in to [learn.365datascience.com](https://learn.365datascience.com) in your browser.
+2. Open **DevTools** (`F12` or `Cmd+Option+I` on macOS).
+3. Go to the **Network** tab and make sure recording is on.
+4. Open any course or lesson page so the browser makes API calls.
+5. In the filter box type `api.365datascience.com` (or `api.365financialanalyst.com`).
+6. Click any request to that domain.
+7. Go to **Headers** → **Request Headers**.
+8. Find the `Authorization` header. Its value looks like:
+   ```
+   Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+   ```
+9. Copy everything **after** the word `Bearer ` (the long `eyJ...` string).
+10. Paste it as the `authorization_token` value in `input.json`.
+
+> **Tip — faster alternative:** In DevTools, go to the **Application** tab → **Local Storage** → `https://learn.365datascience.com`. Look for a key named `token`, `access_token`, or `auth`. The value is your JWT.
+
+---
+
+### How to get `policy_key`
+
+This is a Brightcove playback key used to fetch video stream URLs. It is long-lived and rarely changes.
+
+**Steps:**
+
+1. Log in and open any **video lesson** (the key only appears when a video is loaded).
+2. Open **DevTools** → **Network** tab.
+3. In the filter box type `brightcove`.
+4. Play the video (or wait for it to load) — a request to `edge.api.brightcove.com` will appear.
+5. Click that request → **Headers** → **Request Headers**.
+6. Find the `Accept` header. It looks like:
+   ```
+   application/json;pk=BCpkADawqM0T8lW3nMChuAbrcunBBLn...
+   ```
+7. Copy everything **after** `pk=` — the full `BCpkAD...` string.
+8. Paste it as the `policy_key` value in `input.json`.
+
+**Alternative — search the page source:**
+
+1. DevTools → **Sources** tab (Chrome) or **Debugger** (Firefox).
+2. Press `Ctrl+Shift+F` to search all files.
+3. Search for `BCpk` — Brightcove policy keys always start with this prefix.
+4. Copy the full string.
+
+---
+
+### How to get `course_url`
+
+1. Navigate to the course page on the 365 platform.
+2. Copy the URL from the browser address bar.
+
+Supported URL formats:
+
+```
+https://learn.365datascience.com/courses/preview/<course-slug>/
+https://learn.365datascience.com/courses/<course-slug>/
+https://learn.365financialanalyst.com/courses/preview/<course-slug>/
+```
+
+> The downloader is domain-aware: it automatically routes API calls to `api.365datascience.com` or `api.365financialanalyst.com` based on the URL you provide.
+
+---
+
+## Running the downloader
+
+### Download all courses (auto-discovered from listing page)
 
 ```bash
 uv run python main.py
 ```
 
-## FFmpeg installation guide
+`main.py` scrapes the `/courses` listing page, extracts all course links, and downloads each one in sequence. If the listing page is login-gated, it falls back to `course_url` / `course_urls` in `input.json`.
 
-FFmpeg is recommended for best video quality and stream merging.
+### Download a single course
 
-### Windows (recommended)
+Set `course_url` in `input.json`, then:
 
-Install with winget:
-
-```powershell
-winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
+```bash
+uv run python download_single_course.py
 ```
 
-Verify:
+### Re-clean already downloaded files
 
-```powershell
-ffmpeg -version
+If you have previously downloaded files that contain raw Editor.js JSON:
+
+```bash
+uv run python clean_downloaded_files.py
 ```
 
-If `ffmpeg` is not recognized, close and reopen terminal and run verify again.
+This scans `~/Downloads/365DataScience/` and rewrites any malformed `.html` / `.txt` files in-place — no network requests needed.
+
+---
+
+## Token expiry mid-run
+
+The `authorization_token` (JWT) expires roughly **1 hour** after you log in. During a long batch run, the token may expire before all courses finish downloading. When this happens the downloader pauses automatically and prints:
+
+```
+⚠️  [Course API] Token expired or invalid: ...
+
+  → Open  /path/to/dds/input.json
+  → Replace the value of "authorization_token" with your new token
+  → Press Enter when done, or type 's' to abort:
+```
+
+**What to do:**
+
+1. Go back to your browser and get a fresh token using the steps in [How to get authorization_token](#how-to-get-authorization_token).
+2. Open `input.json` in your editor and replace `authorization_token` with the new value. Save the file.
+3. Press **Enter** in the terminal.
+
+The downloader reads the new token from `input.json`, updates its in-memory state, and **resumes from where it left off** — no restart, no re-downloading.
+
+> Typing `s` (then Enter) skips the current asset or aborts the current course API call, depending on where the expiry was detected.
+
+---
+
+## Output structure
+
+All downloads go to `~/Downloads/365DataScience/`:
+
+```
+~/Downloads/365DataScience/
+└── <Course Name>/
+    ├── <course-slug>_0.zip          ← resource ZIP (if available)
+    ├── 1 - <Section Name>/
+    │   ├── 1 - <Lesson Name>.mp4    ← video lesson
+    │   ├── 2 - <Lesson Name>.html   ← text lesson (styled HTML)
+    │   └── 2 - <Lesson Name>.txt    ← text lesson (plain text)
+    └── 2 - <Section Name>/
+        └── ...
+```
+
+Each text lesson is exported in two formats:
+- **`.html`** — styled with Inter font, card layout, syntax-highlighted code blocks, tables, checklists, quotes
+- **`.txt`** — clean plain text with ASCII section dividers, suitable for reading in a terminal or feeding to an LLM
+
+---
+
+## FFmpeg installation
+
+FFmpeg is recommended for best video quality. Without it the downloader falls back to single-stream format (slightly lower quality) via the bundled `imageio-ffmpeg` package.
 
 ### macOS
-
-Install with [Homebrew](https://brew.sh/):
 
 ```bash
 brew install ffmpeg
 ```
 
-Verify:
+### Windows
+
+```powershell
+winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
+```
+
+After install, close and reopen your terminal, then verify:
 
 ```bash
 ffmpeg -version
 ```
 
-### Python fallback (already supported in this project)
+### Python fallback (automatic)
 
-This project also uses `imageio-ffmpeg` as fallback. If system FFmpeg is not found in PATH, it will try bundled FFmpeg automatically.
+If FFmpeg is not found in PATH, the downloader automatically tries the `imageio-ffmpeg` bundled binary. No extra steps required.
 
-## Troubleshooting and common install/runtime bugs
+---
 
-### 1) `ffmpeg is not installed` while downloading
+## Logs and debugging
 
-Cause:
-- FFmpeg not in PATH, or shell not restarted after install.
+Every run writes structured logs to `trace.jsonl` (in the `dds/` folder) and prints them to the terminal.
 
-Fix:
-- Reopen terminal, run `ffmpeg -version`.
-- Re-run `uv sync` to ensure `imageio-ffmpeg` is installed.
-- Run via uv: `uv run python main.py`.
+### Log entry format
 
-### 2) `No course links found at .../courses`
+```json
+{
+  "ts":      "2026-03-21T10:30:00Z",
+  "seq":     42,
+  "session": "a1b2c3d4",
+  "level":   "ERROR",
+  "module":  "dds.worker",
+  "event":   "course_error",
+  "data":    { "index": 3, "course_url": "https://..." },
+  "error":   "401 Unauthorized"
+}
+```
 
-Cause:
-- Listing page redirected to login or changed HTML layout.
+| Field | Description |
+|---|---|
+| `ts` | UTC timestamp |
+| `seq` | Monotonic counter — use to reconstruct exact event order |
+| `session` | 8-character hex ID that groups all events from one run |
+| `level` | `INFO`, `WARN`, or `ERROR` — filter without reading event names |
+| `module` | `dds.main` (orchestration) or `dds.worker` (download internals) |
+| `event` | Snake-case event name describing what happened |
+| `data` | All context fields (course URL, filepath, asset index, etc.) |
+| `error` | Present only on errors — the error message string |
 
-Fix:
-- Set `course_url` (or `course_urls`) directly in `input.json`.
-- Ensure `authorization_token` is valid.
+The file is automatically trimmed to the **500 most recent entries** so it stays readable without growing unbounded.
 
-### 3) `404 ... /courses/{slug}/player`
+### Sharing logs with an LLM for debugging
 
-Cause:
-- Invalid/non-course URL used as input.
+To debug a failed run, paste the relevant portion of `trace.jsonl` into your LLM conversation. The most useful approach:
 
-Fix:
-- Use full course URL format like:
-  - `https://learn.365datascience.com/courses/preview/<course-slug>/`
-  - or `https://learn.365datascience.com/courses/<course-slug>/`
+1. Open `trace.jsonl`.
+2. Find the `session` value from the run you want to debug (it appears in every line).
+3. Filter lines by that session:
+   ```bash
+   grep '"session": "a1b2c3d4"' trace.jsonl
+   ```
+4. Paste those lines with a question like: *"This is my run log. Course 3 failed — what went wrong and how do I fix it?"*
 
-### 4) `400 ... /courses/file`
+Key events to look for when debugging:
 
-Cause:
-- That course has no downloadable resource zip, or endpoint rejects resource request.
+| Event | Meaning |
+|---|---|
+| `course_error` | A whole course failed — check `error` field |
+| `lesson_content_missing` | Text lesson had no content in any API |
+| `lesson_html_missing` | HTML lesson content not found |
+| `text_lesson_api_skip` | `/course/text/{id}` returned non-200, asset skipped |
+| `resource_api_empty` | Course has no downloadable ZIP (normal for many courses) |
+| `video_download_start` / `done` | Video download lifecycle |
 
-Fix:
-- This is handled gracefully; videos should still download.
+---
 
-### 5) `500 ... /courses/file`
+## Troubleshooting
 
-Cause:
-- Upstream resource endpoint failure for that course.
+### `No course links found`
 
-Fix:
-- This is handled as "no resources" and the script continues with videos/HTML.
+The listing page redirected to login or changed its HTML structure.
 
-### 6) Pydantic validation errors for course fields
+**Fix:** Set `course_url` or `course_urls` directly in `input.json`.
 
-Cause:
-- Upstream API response shape changed.
+### `404 on /courses/{slug}/player`
 
-Fix:
-- Pull latest repo changes.
-- If error persists, capture the exact validation block and patch models in `course_model.py`.
+Invalid or non-existent course slug.
 
-### 7) HTML lesson pages are missing
+**Fix:** Use a full course URL from the browser address bar:
+```
+https://learn.365datascience.com/courses/preview/<course-slug>/
+```
 
-Cause:
-- Some lessons do not expose inline `asset.text` in course payload.
+### `401` / `403` / `Token expired`
 
-Fix:
-- The script fetches text via `/course/text/{asset_id}` and then tries lecture fallback URLs.
-- Check logs for `lesson_content_missing` and `lesson_html_missing` to identify assets where upstream APIs returned no textual payload.
+Your `authorization_token` is invalid or has expired.
 
-### 8) Authorization token expires during long runs
+**Fix:** [Get a fresh token](#how-to-get-authorization_token) and update `input.json`. If this happens mid-run, the downloader will pause and prompt you — see [Token expiry mid-run](#token-expiry-mid-run).
 
-Cause:
-- API responds `401/403` or "invalid or expired" mid-download.
+### `400` or `404` on `/courses/file`
 
-Fix:
-- Script prompts for a fresh token in terminal.
-- New token is persisted to local `input.json` and reused for remaining API calls.
+That course has no downloadable resource ZIP. This is expected for most courses.
 
-## Output
+**Fix:** Nothing to do — the downloader treats this as "no resources" and continues with videos and text lessons.
 
-Downloads are saved under:
+### `500` on `/courses/file`
 
-- `~/Downloads/365DataScience/...`
+Upstream resource endpoint failure.
 
-Typical file outputs per lesson:
+**Fix:** Treated automatically as "no resources" — videos and text lessons still download.
 
-- Video lesson: `.../<index> - <lesson>.mp4` (or similar extension)
-- Text lesson: `.../<index> - <lesson>.html` and `.../<index> - <lesson>.txt`
+### HTML lessons are missing or empty
+
+The lesson has no inline `text` in the course payload.
+
+**Fix:** The downloader automatically tries `/course/text/{asset_id}` and then lecture fallback endpoints. If all return nothing, the asset is logged as `lesson_content_missing`. Check your `trace.jsonl` for those events.
+
+### HTML files contain raw JSON
+
+Older downloads may have been saved before the Editor.js parser was in place.
+
+**Fix:**
+```bash
+uv run python clean_downloaded_files.py
+```
+
+### Pydantic validation errors
+
+The upstream API changed its response shape.
+
+**Fix:** Pull the latest repo version. If the error persists, capture the raw API response and patch `course_model.py`.
+
+---
+
+## Technical architecture
+
+### System overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              dds — local machine                            │
+│                                                                             │
+│  ┌─────────────┐    ┌──────────────┐    ┌──────────────────────────────┐   │
+│  │  input.json │───▶│   main.py    │───▶│   download_single_course.py  │   │
+│  │  (config)   │    │ orchestrator │    │      download engine         │   │
+│  └─────────────┘    └──────┬───────┘    └──────────────┬───────────────┘   │
+│                            │                           │                   │
+│  ┌─────────────┐           │            ┌──────────────┴───────────────┐   │
+│  │  logger.py  │◀──────────┴────────────│   course_model.py            │   │
+│  │ trace.jsonl │                        │   video_model.py             │   │
+│  └─────────────┘                        │   (Pydantic data models)     │   │
+│                                         └──────────────────────────────┘   │
+│  ┌─────────────────────────┐                                                │
+│  │  clean_downloaded_files │  (post-run pass, no network calls)            │
+│  └─────────────────────────┘                                                │
+│                                                                             │
+│              ~/Downloads/365DataScience/  (all output files)               │
+└───────────────────────────────────────┬─────────────────────────────────────┘
+                                        │ HTTPS
+          ┌─────────────────────────────┼──────────────────────────┐
+          ▼                             ▼                          ▼
+┌─────────────────────┐   ┌────────────────────────┐   ┌──────────────────────┐
+│  365 Platform API   │   │  Brightcove Playback   │   │  Course Listing Page │
+│ api.365datascience  │   │  edge.api.brightcove   │   │  learn.365datascience│
+│    .com             │   │       .com             │   │       .com/courses   │
+│                     │   │                        │   │  (HTML scraping)     │
+│ /courses/{slug}/    │   │ /playback/v1/accounts/ │   └──────────────────────┘
+│   player            │   │  6258000438001/videos/ │
+│ /courses/file       │   │  {video_id}            │
+│ /course/text/{id}   │   │                        │
+│ /courses/{slug}/    │   │  Returns: HLS m3u8     │
+│   lectures/{id}     │   │  stream URL            │
+└─────────────────────┘   └────────────────────────┘
+```
+
+---
+
+### Module responsibilities
+
+| File | Lines | Responsibility |
+|---|---|---|
+| `main.py` | ~195 | Orchestration: config validation, course discovery via scraping, batch loop, cleanup trigger |
+| `download_single_course.py` | ~1 100 | All API calls, video download with yt-dlp/ffmpeg, text parsing, file writing, token refresh |
+| `logger.py` | ~100 | Structured JSONL logger, session IDs, level inference, rolling 500-line window |
+| `course_model.py` | ~126 | Pydantic v1 models for the `/courses/{slug}/player` API response |
+| `video_model.py` | ~82 | Pydantic v1 models for the Brightcove `/playback/v1/…` API response |
+| `clean_downloaded_files.py` | ~72 | Post-run offline cleanup: regex-detects raw Editor.js JSON in `.html`/`.txt` and rewrites it |
+
+---
+
+### Phase 1 — Course discovery (`main.py`)
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  STARTUP                                                         │
+  │                                                                  │
+  │  input.json ──▶ load_input_data()                               │
+  │                   validates: authorization_token,                │
+  │                              policy_key, quality                 │
+  └──────────────────────────────┬───────────────────────────────────┘
+                                 │
+                                 ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  COURSE DISCOVERY                                                │
+  │                                                                  │
+  │  GET {base_url}/{courses_collector_path}                         │
+  │       (default: learn.365datascience.com/courses)               │
+  │              │                                                   │
+  │              ▼                                                   │
+  │  BeautifulSoup HTML parse                                        │
+  │     1. scan <div class="course-card-body"> for anchors          │
+  │     2. scan all <a href> as fallback                             │
+  │              │                                                   │
+  │              ▼                                                   │
+  │  extract_course_links()  ──▶  is_downloadable_course_url()      │
+  │     filters: must contain "/courses/" in path                   │
+  │              must have a slug after "/courses/"                  │
+  │              "/courses/preview/" needs slug after "preview"     │
+  │              │                                                   │
+  │     empty? ──┤                                                   │
+  │              ▼                                                   │
+  │  get_course_links_from_input()   ◀── course_url / course_urls   │
+  │              │                        in input.json (fallback)  │
+  │              ▼                                                   │
+  │  all_course_link  [ url1, url2, url3, ... ]                     │
+  └──────────────────────────────┬───────────────────────────────────┘
+                                 │
+                                 ▼
+                    (Phase 2 — per-course download)
+```
+
+> **Why scraping first, fallback second:** The listing page gives all courses automatically without the user needing to collect URLs manually. When the page is behind a login wall or changes layout, the fallback ensures the script still works.
+
+---
+
+### Phase 2 — Per-course download (`download_single_course.py`)
+
+Each course URL goes through this pipeline. All three tracks run sequentially per course; a failure in one does **not** stop the others.
+
+```
+  course_url  (e.g. learn.365datascience.com/courses/preview/python/)
+       │
+       ├─▶ get_api_base_url()      resolves to api.365datascience.com
+       │                           or api.365financialanalyst.com
+       └─▶ get_learn_base_url()    resolves to learn.365datascience.com
+
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  TRACK A — Resources (ZIP files)                                        │
+  │                                                                         │
+  │  request_course_api()   GET /courses/{slug}/player   ──▶  CourseModel  │
+  │       │                                                                 │
+  │       └─▶  request_course_resource_api()                               │
+  │                POST /courses/file                                       │
+  │                body: { courseId, name, courseZip: true }               │
+  │                │                                                        │
+  │                ├── 400 / 404  ──▶  no resources, skip silently         │
+  │                ├── 5xx        ──▶  treat as no resources, continue     │
+  │                └── 200        ──▶  list of presigned S3 URLs           │
+  │                                        │                               │
+  │                                        ▼                               │
+  │                              urllib.request.urlretrieve()              │
+  │                              ~/Downloads/365DataScience/               │
+  │                                {CourseName}/{slug}_{i}.zip             │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  TRACK B — Videos                          (asset.type == "lesson"     │
+  │                                             and asset.video != False)  │
+  │                                                                         │
+  │  for section in CourseModel.sections:                                  │
+  │    for asset in section.assets:                                         │
+  │      if asset has video (VideoItem with ext_id):                       │
+  │                                                                         │
+  │        request_brightcove_api(video_item.ext_id, policy_key)           │
+  │          GET edge.api.brightcove.com/playback/v1/accounts/             │
+  │              6258000438001/videos/{ext_id}                             │
+  │          Accept: application/json;pk={policy_key}                      │
+  │                 │                                                       │
+  │                 ▼                                                       │
+  │          VideoModel  ──▶  sources[0].src  (master HLS .m3u8 URL)      │
+  │                 │                                                       │
+  │                 ▼                                                       │
+  │          download_video_from_stream_url()                              │
+  │            ┌── ffmpeg in PATH?  ──▶  bestvideo+bestaudio merged        │
+  │            └── no ffmpeg?       ──▶  imageio-ffmpeg fallback binary    │
+  │                                      best single-stream format         │
+  │            yt_dlp.YoutubeDL(concurrent_fragment_downloads=15)         │
+  │                 │                                                       │
+  │                 ▼                                                       │
+  │          ~/Downloads/365DataScience/{CourseName}/                      │
+  │            {i} - {SectionName}/{j} - {LessonName}.mp4                 │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  TRACK C — Text lessons  (all asset types, every asset in the course)  │
+  │                                                                         │
+  │  (see Phase 3 — Text extraction pipeline below)                        │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  POST-RUN CLEANUP                                                       │
+  │                                                                         │
+  │  clean_directory(~/Downloads/365DataScience/)                          │
+  │    rglob("*.html") + rglob("*.txt")                                    │
+  │    regex scan for \[\s*\{  …  \}\s*\]  (stringified JSON array)       │
+  │    if found ──▶ editorjs_to_html_and_text() ──▶ overwrite in-place    │
+  │    (no network calls — pure local file rewriting)                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Phase 3 — Text extraction pipeline
+
+Text content for every asset is attempted through three levels, each a fallback for the previous. The first level that returns content wins; the rest are skipped.
+
+```
+  for every asset in the course
+       │
+       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  LEVEL 1 — Inline payload (zero extra network calls)                   │
+  │                                                                         │
+  │  asset.text  (field from /courses/{slug}/player response)              │
+  │  asset.lecture_id ──▶ request_lecture_html()                           │
+  │    tries 3 URL patterns:                                               │
+  │      /courses/{slug}/lectures/{id}                                     │
+  │      /courses/lectures/{id}                                            │
+  │      /lectures/{id}                                                    │
+  │    accepts text/html response OR extracts HTML from JSON payload       │
+  │                                                                         │
+  │  result? ──▶ save_html_asset()  (styled HTML wrapper)                 │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │ no result
+                               ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  LEVEL 2 — Text lesson API  (primary for reading/non-video lessons)    │
+  │                                                                         │
+  │  fetch_text_lesson_content(asset.id)                                   │
+  │    GET {api_base}/course/text/{asset_id}                               │
+  │    Authorization: Bearer {token}                                       │
+  │                                                                         │
+  │    on 401/403 ──▶ token refresh prompt (see Token Refresh section)    │
+  │                                                                         │
+  │    response is parsed through 3 strategies (first match wins):         │
+  │      a) editorjs_to_html_and_text()   ◀── most common                 │
+  │      b) _extract_html_from_payload()  ◀── if payload is plain HTML    │
+  │      c) _collect_all_strings()        ◀── last-resort text scrape     │
+  │                                                                         │
+  │  result? ──▶  save_html_asset()  →  {lesson}.html                     │
+  │               write_text()       →  {lesson}.txt                      │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │ no result
+                               ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  LEVEL 3 — Missing (logged, no crash)                                  │
+  │                                                                         │
+  │  log_event("lesson_content_missing", asset_id=..., asset_name=...)    │
+  │  continue to next asset                                                │
+  └─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Editor.js block parser (`editorjs_to_html_and_text`)
+
+The 365 platform stores reading lesson content as **Editor.js JSON** — a flat array of typed blocks. This parser converts that into styled HTML and plain text.
+
+```
+  Raw API response: flat JSON array of block objects
+  ┌──────────────────────────────────────────────────────────┐
+  │  [                                                       │
+  │    { "id": "abc", "type": "header",                     │
+  │      "data": { "text": "What is Python?", "level": 2 }} │
+  │    { "id": "def", "type": "paragraph",                  │
+  │      "data": { "text": "Python is a..." }}              │
+  │    { "id": "ghi", "type": "listUnordered",              │
+  │      "data": { "content": "Easy to read" }}             │
+  │    ...                                                   │
+  │  ]                                                       │
+  └──────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+            editorjs_to_html_and_text()
+                           │
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+    html_parts[ ]    text_parts[ ]    list-grouping state
+                                      pending_list_tag
+                                      pending_list_html
+                                      pending_list_text
+
+  Block type mapping:
+  ┌──────────────────────────┬──────────────────────┬────────────────────────┐
+  │ Editor.js block type     │ HTML output          │ Plain text output      │
+  ├──────────────────────────┼──────────────────────┼────────────────────────┤
+  │ header                   │ <h1>–<h6>            │ text + ═══ / ─── rule  │
+  │ paragraph                │ <p>                  │ plain text             │
+  │ listUnordered            │ <ul><li>…            │ • item (grouped)       │
+  │ listOrdered              │ <ol><li>…            │ 1. item (grouped)      │
+  │ list (standard)          │ <ul>/<ol> (all items)│ bullet/numbered list   │
+  │ templateLearningObjectiv.│ <div class="learn…"> │ Learning Objectives    │
+  │ quote                    │ <blockquote>         │ "text" — caption       │
+  │ image                    │ <figure><img>        │ [Image: caption]       │
+  │ table                    │ <table>              │ col1 │ col2 │ col3     │
+  │ callOut / warning /alert │ <div class="callout">│ 💡 / ⚠️  message       │
+  │ checklist                │ <ul class="checklis">│ [x] / [ ] item         │
+  │ delimiter                │ <hr>                 │ ─────────────────────  │
+  │ (unknown type)           │ <p> (fallback)       │ plain text fallback    │
+  └──────────────────────────┴──────────────────────┴────────────────────────┘
+
+  List-grouping behaviour:
+    listUnordered / listOrdered blocks each = ONE item.
+    Consecutive same-type blocks are accumulated and flushed as a single
+    <ul> or <ol> when a non-list block is encountered.
+    Mixed ul/ol sequences flush the pending list before starting the new one.
+
+  Output:
+  ┌──────────────────┐    ┌──────────────────────────────────────────────┐
+  │  {lesson}.html   │    │  <article> styled with Inter font, card      │
+  │                  │    │  layout, accent colours, responsive CSS       │
+  │                  │    │  generated by save_html_asset()               │
+  └──────────────────┘    └──────────────────────────────────────────────┘
+  ┌──────────────────┐    ┌──────────────────────────────────────────────┐
+  │  {lesson}.txt    │    │  clean readable text, headings underlined     │
+  │                  │    │  with ═══/───, lists bulleted, no HTML tags   │
+  └──────────────────┘    └──────────────────────────────────────────────┘
+```
+
+---
+
+### Token refresh mechanism
+
+```
+  API call (any endpoint)
+        │
+        ▼
+  response.status_code ∈ {401, 403}
+  OR "invalid or expired" in response body?
+        │ yes
+        ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  prompt_new_token()                                      │
+  │                                                          │
+  │  prints: "→ Open  /path/to/input.json"                  │
+  │           "→ Replace authorization_token"               │
+  │           "→ Press Enter when done, or 's' to skip"     │
+  │                                                          │
+  │  user saves new token to input.json in their editor     │
+  │  user presses Enter                                      │
+  │                                                          │
+  │  reads input.json ──▶ update_auth_token(new_token)      │
+  │    sets module-level _CURRENT_AUTH_TOKEN                 │
+  │    re-writes input.json with new value                   │
+  └──────────────────────────────────────────────────────────┘
+        │
+        ▼
+  `continue` — the while True loop retries the same request
+  with the new token via get_auth_token()
+
+  All subsequent API calls in the same run use the new token
+  automatically through get_auth_token(fallback).
+```
+
+> Every API function that uses the token has a `while True` retry loop. On a successful response it `break`s out. On a 401/403 it prompts, updates the token, then loops back to retry — so no request is permanently lost due to expiry.
+
+---
+
+### Data models
+
+#### `CourseModel` (from `/courses/{slug}/player`)
+
+```
+  CourseModel
+  ├── id: int
+  ├── slug: str
+  ├── info: Info
+  │     ├── name: str               ← used as the folder name on disk
+  │     ├── free: bool
+  │     └── paidAccess: bool
+  ├── examId: int
+  ├── stats: Stats
+  │     ├── lectureDownloadables: int
+  │     ├── lectureDownloadablesFree: int
+  │     └── lectures: int
+  ├── nextLecture: NextLecture
+  └── sections: List[Section]
+        ├── order: int              ← folder prefix (1, 2, 3 …)
+        ├── name: str               ← folder name segment
+        ├── duration: int
+        ├── progress: Progress
+        └── assets: List[Asset]
+              ├── id: int           ← used for /course/text/{id}
+              ├── type: str         ← "lesson", "quiz", "exam" …
+              ├── name: str         ← file name on disk
+              ├── lectureId: int    ← used for lecture fallback API
+              ├── text: str | None  ← inline HTML if present
+              ├── video: VideoItem | bool | None
+              │     ├── extId: str  ← Brightcove video ID
+              │     └── provider: str
+              └── downloadables: List[Downloadable]
+```
+
+#### `VideoModel` (from Brightcove `/playback/v1/…`)
+
+```
+  VideoModel
+  ├── id: str
+  ├── name: str
+  ├── sources: List[Source]
+  │     ├── src: str      ← HLS master playlist URL (.m3u8)  ← used
+  │     ├── type: str     ← "application/x-mpegURL"
+  │     └── height: int   ← resolution
+  └── text_tracks: List[TextTrack]   ← subtitle/caption tracks
+```
+
+---
+
+### API endpoints reference
+
+| # | API | Method | Endpoint | Auth |
+|---|---|---|---|---|
+| 1 | Course listing page | `GET` | `{base_url}/courses` | none (public) |
+| 2 | Course player | `GET` | `{api_base}/courses/{slug}/player` | Bearer JWT |
+| 3 | Course resources | `POST` | `{api_base}/courses/file` | Bearer JWT |
+| 4 | Text lesson | `GET` | `{api_base}/course/text/{asset_id}` | Bearer JWT |
+| 5 | Lecture content | `GET` | `{api_base}/courses/{slug}/lectures/{id}` | Bearer JWT |
+| 6 | Brightcove video | `GET` | `https://edge.api.brightcove.com/playback/v1/accounts/6258000438001/videos/{video_id}` | `Accept: application/json;pk={policy_key}` |
+
+`{api_base}` is resolved per course URL:
+
+| Course domain | API base |
+|---|---|
+| `learn.365datascience.com` | `https://api.365datascience.com` |
+| `learn.365financialanalyst.com` | `https://api.365financialanalyst.com` |
+
+---
+
+### Logging system (`logger.py`)
+
+```
+  log_event(module, event, **fields)
+       │
+       ├─▶ infer level:
+       │     "error" in event name OR error= kwarg ──▶ ERROR
+       │     "skip"/"missing"/"expired"/"warn"/"fail" ──▶ WARN
+       │     everything else ──▶ INFO
+       │
+       ├─▶ build entry dict:
+       │     { ts, seq, session, level, module, event, data, error? }
+       │
+       ├─▶ print to stdout (human-readable, one line)
+       │
+       └─▶ append to trace.jsonl
+               │
+               └─▶ _trim_if_needed()
+                     if lines > 550:
+                       keep last 500 lines
+                       rewrite file
+
+  session = uuid4().hex[:8]   generated once at import time
+  seq     = monotonic int     increments with every call in the session
+```
+
+Both `main.py` and `download_single_course.py` delegate to this module via thin wrappers that fix the `module` tag (`dds.main` / `dds.worker`). All entries in a single run share the same `session` value, making it trivial to filter one run's logs out of the rolling file.
+
+---
 
 ## Notes
 
 - Use only with content you are authorized to access.
-- Network/API changes from upstream may break scraping or download behavior.
+- `input.json` is gitignored — never commit real tokens.
+- Network or API changes upstream may break scraping or download behavior; check `trace.jsonl` for details.

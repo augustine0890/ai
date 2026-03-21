@@ -1,5 +1,4 @@
 import json
-import datetime
 import shutil
 import string
 import subprocess
@@ -35,27 +34,35 @@ def update_auth_token(new_token: str) -> None:
             pass
 
 
-def log_event(event: str, **fields: Any) -> None:
-    # 1. Human-readable console trace
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    human_parts = [f"[{now}]", "[dds.worker]", f"event={event}"]
-    
-    # 2. Structured LLM-friendly trace dictionary
-    trace: dict[str, Any] = {"timestamp": now, "module": "dds.worker", "event": event}
+def prompt_new_token(skip_label: str = "skip") -> str | None:
+    """Ask the user to update input.json instead of pasting in the terminal.
 
-    for key, value in fields.items():
-        human_parts.append(f"{key}={value!r}")
-        trace[key] = str(value) if isinstance(value, (Path, Exception)) else value
-
-    print(" ".join(human_parts))
-    
-    # 3. Append to JSONL file for machine parsing
-    trace_path = Path(__file__).parent / "trace.jsonl"
+    Returns the new token string, or None if the user chose to skip/abort.
+    Reads the token from input.json after the user confirms, avoiding
+    terminal chunking issues with long Bearer tokens.
+    """
+    input_file = Path(__file__).parent / "input.json"
+    print(f"\n  → Open  {input_file}")
+    print(    "  → Replace the value of \"authorization_token\" with your new token")
+    print(   f"  → Press Enter when done, or type 's' to {skip_label}: ", end="", flush=True)
+    choice = input().strip().lower()
+    if choice == "s":
+        return None
     try:
-        with trace_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(trace) + "\n")
+        data = json.loads(input_file.read_text(encoding="utf-8"))
+        token = data.get("authorization_token", "").strip()
+        if token:
+            update_auth_token(token)
+            return token
     except Exception:
         pass
+    print("  ⚠️  Could not read token from input.json")
+    return None
+
+
+def log_event(event: str, **fields: Any) -> None:
+    from logger import log_event as _log
+    _log("dds.worker", event, **fields)
 
 
 def normalize_name(name: str) -> str:
@@ -622,11 +629,10 @@ def fetch_text_lesson_content(
                 
             if response.status_code in (401, 403) or "invalid or expired" in reason.lower():
                 print(f"\n⚠️  [Text API] Token expired or invalid: {reason}")
-                new_token = input("Paste new authorization_token here (or press Enter to skip asset): ").strip()
+                new_token = prompt_new_token(skip_label="skip asset")
                 if not new_token:
                     log_event("text_lesson_api_skip", url=url, status_code=response.status_code, reason=reason)
                     return None
-                update_auth_token(new_token)
                 continue
 
             log_event("text_lesson_api_skip", url=url, status_code=response.status_code, reason=reason)
@@ -838,10 +844,9 @@ def request_course_api(
                 
             if response.status_code in (401, 403) or "invalid or expired" in reason.lower():
                 print(f"\n⚠️  [Course API] Token expired or invalid: {reason}")
-                new_token = input("Paste new authorization_token here (or press Enter to abort): ").strip()
+                new_token = prompt_new_token(skip_label="abort")
                 if not new_token:
                     response.raise_for_status()
-                update_auth_token(new_token)
                 continue
                 
         response.raise_for_status()

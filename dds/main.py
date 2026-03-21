@@ -1,5 +1,4 @@
 import json
-import datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -15,26 +14,8 @@ REQUEST_TIMEOUT_SECONDS = 20
 
 
 def log_event(event: str, **fields: Any) -> None:
-    # 1. Human-readable console trace
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    human_parts = [f"[{now}]", "[dds.main]", f"event={event}"]
-    
-    # 2. Structured LLM-friendly trace dictionary
-    trace: dict[str, Any] = {"timestamp": now, "module": "dds.main", "event": event}
-
-    for key, value in fields.items():
-        human_parts.append(f"{key}={value!r}")
-        trace[key] = str(value) if isinstance(value, (Path, Exception)) else value
-
-    print(" ".join(human_parts))
-    
-    # 3. Append to JSONL file for machine parsing
-    trace_path = Path(__file__).parent / "trace.jsonl"
-    try:
-        with trace_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(trace) + "\n")
-    except Exception:
-        pass
+    from logger import log_event as _log
+    _log("dds.main", event, **fields)
 
 
 def load_input_data(input_file: Path) -> dict[str, Any]:
