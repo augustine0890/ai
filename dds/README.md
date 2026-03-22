@@ -20,6 +20,7 @@ A Python CLI tool that downloads videos, text lessons (HTML + TXT), and resource
 8. [Logs and debugging](#logs-and-debugging)
 9. [Troubleshooting](#troubleshooting)
 10. [Technical architecture](#technical-architecture)
+11. [Case study: fixing raw JSON in HTML files](#case-study-fixing-raw-json-in-html-files)
 
 ---
 
@@ -830,6 +831,203 @@ The 365 platform stores reading lesson content as **Editor.js JSON** — a flat 
 ```
 
 Both `main.py` and `download_single_course.py` delegate to this module via thin wrappers that fix the `module` tag (`dds.main` / `dds.worker`). All entries in a single run share the same `session` value, making it trivial to filter one run's logs out of the rolling file.
+
+---
+
+## Case study: fixing raw JSON in HTML files
+
+This section documents a real bug that appeared during development and how it was resolved step by step. Reading it will help you debug similar pipeline problems in the future.
+
+---
+
+### The symptom
+
+After running `redownload_html.py`, opening an `.html` file showed raw JSON instead of readable text:
+
+```
+[{"id":"abc","type":"paragraph","data":{"text":"Python is a programming..."}},
+ {"id":"def","type":"header","data":{"text":"Variables","level":2}},
+ {"id":"ghi","type":"attaches","data":{"file":{"url":"https://...","name":"slides.pdf"}}}]
+```
+
+The page was completely unreadable. You expected nicely formatted headings, paragraphs, and download links — you got a JSON dump instead.
+
+---
+
+### Step 1 — Where is the content written to disk?
+
+The first question to answer in any pipeline bug: **at which point does the bad data enter the pipeline?**
+
+The write path for text lessons is:
+
+```
+API response
+    └─▶ asset.text  (or request_lecture_html())
+           └─▶ save_html_asset(html_path, asset.name, content)
+                      └─▶ fp.write_text(...)   ← disk
+```
+
+By adding a `print(repr(content[:200]))` before `save_html_asset()` you can immediately see whether the bad data comes *in* from the API or is introduced *inside* the save function.
+
+**What was found:** `asset.text` and `request_lecture_html()` were returning raw JSON strings directly from the API. The save function was innocent — it was just faithfully writing what it received.
+
+**Lesson:** Always find the exact point where good data turns bad before trying to fix anything. "What does the data look like just before the write?" is the fastest way to isolate a pipeline bug.
+
+---
+
+### Step 2 — Why was the API returning raw JSON?
+
+The 365 platform uses [Editor.js](https://editorjs.io/) to store lesson content. Editor.js saves content as a JSON array of typed "blocks":
+
+```json
+[
+  { "type": "header", "data": { "text": "My Title", "level": 2 } },
+  { "type": "paragraph", "data": { "text": "Some content..." } }
+]
+```
+
+The API was returning this JSON **as-is**. The code was supposed to call `editorjs_to_html_and_text()` to convert it to readable HTML, but this conversion step was missing in two places:
+- When saving `asset.text`
+- When saving the result of `request_lecture_html()`
+
+**What was fixed:** Added `ensure_parsed_html()` — a small guard function that sits between the API response and `save_html_asset()`. It checks if the content looks like JSON (starts with `[` or `{`), tries to parse and render it, and only falls through to write raw text if parsing fails:
+
+```python
+def ensure_parsed_html(raw_content: str) -> str:
+    stripped = raw_content.strip()
+    if stripped.startswith(("[", "{")):
+        try:
+            payload = json.loads(stripped)
+            result = editorjs_to_html_and_text(payload)
+            if result:
+                return result[0]   # the HTML
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return raw_content   # already HTML, pass through
+```
+
+**Lesson:** When your pipeline handles two different content formats (JSON and HTML), add an explicit *format detection* step at each entry point. Don't assume the upstream always sends what you expect. A small guard at the boundary is safer than assumptions throughout the code.
+
+---
+
+### Step 3 — Why did the parser fail silently on some blocks?
+
+Even after adding the guard, some lessons still rendered incorrectly. The `editorjs_to_html_and_text()` parser was missing handlers for block types the platform actually used:
+
+| Block type | What it is | Was it handled? |
+|---|---|---|
+| `images` | Gallery of images | No |
+| `attaches` | File download attachment | No |
+| `divider` | Horizontal divider line | No |
+| `templateCustomBlock` | Nested Editor.js payload | No |
+
+The most problematic was `templateCustomBlock`. Its `data.content` field is itself an Editor.js object `{"blocks": [...]}`. The generic fallback code stringified this dict as `{'blocks': [...]}` (a Python repr, single-quotes), writing that raw string into the HTML — which then broke the cleaner too.
+
+**What was fixed:** Added explicit handlers for each missing type:
+- `images` — same rendering logic as `image`
+- `attaches` — link with filename and human-readable file size
+- `divider` — `<hr>` tag (same as existing `delimiter`)
+- `templateCustomBlock` — recursive: extract `data.content.blocks` and call `editorjs_to_html_and_text()` again
+
+**Lesson:** When you write a parser, always add a **logging or print statement in the unknown-type fallback path**. Something like:
+
+```python
+else:
+    print(f"[UNKNOWN BLOCK TYPE]: {block_type}")
+```
+
+This immediately tells you which types you are missing, rather than silently producing wrong output. For data-driven parsers (JSON, API responses), unknown cases should be visible, not silent.
+
+---
+
+### Step 4 — Why did the cleaner fail to repair existing broken files?
+
+Even with the fixes above, files downloaded before the fix were already broken on disk. The cleaner `clean_downloaded_files.py` was supposed to repair them — but it was reporting 0 files cleaned.
+
+The cleaner's first approach used **BeautifulSoup** to find elements containing raw JSON and replace them. This failed because:
+
+The raw JSON strings contained **embedded HTML tags inside string values**:
+
+```json
+{"type":"paragraph","data":{"text":"Learn <b>Python</b> with <font color='red'>examples</font>"}}
+```
+
+When BeautifulSoup parsed the HTML file, it treated those `<b>` and `<font>` tags inside the JSON as real HTML elements, **fragmenting the JSON string** into dozens of NavigableStrings. The cleaner could no longer see the JSON as a coherent string — it was already shredded.
+
+**What was fixed:** Switched to regex-based extraction for the main case. The raw JSON always appears in a predictable location in the HTML structure — between `</h1>` and `</article>`. By extracting that region as a raw string *before* BeautifulSoup parses it, the JSON is intact:
+
+```python
+pattern = re.compile(
+    r"(</h1>\s*)"        # end of the lesson title
+    r"(\[.*?\]|{.*?})"  # the raw JSON payload
+    r"(\s*</article>)",  # before closing article
+    re.DOTALL,
+)
+```
+
+Only if the regex finds nothing does the code fall back to BeautifulSoup (for edge cases where JSON is inside a `<p>` or `<div>` rather than in the article body).
+
+**Lesson:** BeautifulSoup is excellent for navigating valid HTML but dangerous when the HTML contains embedded non-HTML text (JSON, code blocks, template syntax). For those cases, **do the raw string extraction first with regex**, then hand the clean JSON string off to a proper JSON parser. The rule: use the right tool for each format — regex for structural position, JSON parser for content.
+
+---
+
+### Step 5 — The Python dict repr format
+
+One more format appeared that no one anticipated. Some older files had content that looked like this:
+
+```
+{'blocks': [{'id': 'abc', 'type': 'paragraph', 'data': {'text': '...'}}]}
+```
+
+Note the **single quotes** — this is Python's `repr()` format for dicts, not valid JSON. `json.loads()` rejects it. This happened because somewhere in the old code a dict was printed or written using Python string conversion instead of `json.dumps()`.
+
+**What was fixed:** Added `ast.literal_eval()` as a second parser alongside `json.loads()`:
+
+```python
+for parser in (json.loads, ast.literal_eval):
+    try:
+        data = parser(text)
+        ...
+    except Exception:
+        continue
+```
+
+`ast.literal_eval` safely evaluates Python literals (strings, numbers, lists, dicts) without executing arbitrary code — it is the standard library's safe alternative to `eval()`.
+
+**Lesson:** When you receive data that might have been serialized in multiple ways (JSON, Python repr, YAML, CSV), try multiple parsers in order of strictness. Always try the strictest/most-standard format first (`json.loads`), then fallback to the more permissive one (`ast.literal_eval`). This way you don't over-rely on the permissive parser, but you also don't silently fail on legacy data.
+
+---
+
+### Summary: the debugging method used
+
+Every step above followed the same pattern:
+
+```
+1. Observe the symptom (broken file on disk)
+        │
+        ▼
+2. Find the exact point in the pipeline where good becomes bad
+   (add print/log just before each write to disk)
+        │
+        ▼
+3. Ask: is the data wrong coming IN or wrong going OUT?
+   → wrong IN  : fix the upstream caller or add a guard at the entry point
+   → wrong OUT : fix the transformation function
+        │
+        ▼
+4. Check what cases the transformation doesn't handle
+   (add logging to the "unknown type" fallback)
+        │
+        ▼
+5. Check if existing broken data can be repaired
+   (consider tool limitations — BeautifulSoup vs regex)
+        │
+        ▼
+6. Test with grep to confirm 0 broken files remain
+   grep -rl '"type":"paragraph"' ~/Downloads/365DataScience/ --include="*.html"
+```
+
+The key insight: **pipeline bugs are easier to fix when you know which stage introduced the bad data.** Binary-search the pipeline with strategic print statements rather than reading all the code trying to reason about it.
 
 ---
 

@@ -512,27 +512,65 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 plain = html_to_plain_text(raw)
                 text_parts.append(f'"{plain}"' + (f"\n    — {caption}" if caption else ""))
 
-        # ── Delimiter ──────────────────────────────────────────────────────
-        elif btype == "delimiter":
+        # ── Delimiter / Divider ────────────────────────────────────────────
+        elif btype in ("delimiter", "divider"):
             html_parts.append("<hr>")
             text_parts.append("─" * 60)
 
-        # ── Image ──────────────────────────────────────────────────────────
-        elif btype == "image":
-            url = (data.get("file") or {}).get("url", "") or data.get("url", "")
+        # ── Image / Images ────────────────────────────────────────────────
+        elif btype in ("image", "images"):
+            file_info = data.get("file") or {}
+            url = file_info.get("url", "") or data.get("url", "")
             caption = data.get("caption", "")
             if url:
                 html_parts.append(
                     f'<figure><img src="{url}" alt="{caption}" loading="lazy">'
-                    f"<figcaption>{caption}</figcaption></figure>"
+                    + (f"<figcaption>{caption}</figcaption>" if caption else "")
+                    + "</figure>"
                 )
                 text_parts.append(f"[Image{': ' + caption if caption else ''}]")
+
+        # ── File attachment ───────────────────────────────────────────────
+        elif btype == "attaches":
+            file_info = data.get("file") or {}
+            file_url = file_info.get("url", "")
+            file_title = file_info.get("title", "") or file_info.get("name", "attachment")
+            file_ext = file_info.get("extension", "")
+            file_size = file_info.get("size", "")
+            if file_url:
+                size_str = ""
+                if file_size:
+                    try:
+                        size_kb = int(file_size) / 1024
+                        size_str = f" ({size_kb:.0f} KB)" if size_kb < 1024 else f" ({size_kb/1024:.1f} MB)"
+                    except (ValueError, TypeError):
+                        pass
+                html_parts.append(
+                    f'<div class="attachment">'
+                    f'<a href="{file_url}" download>📎 {file_title}{size_str}</a>'
+                    f'</div>'
+                )
+                text_parts.append(f"📎 {file_title}{size_str}: {file_url}")
+
+        # ── Template custom block (recursive) ─────────────────────────────
+        elif btype == "templateCustomBlock":
+            inner_content = data.get("content")
+            if isinstance(inner_content, dict):
+                inner_blocks = inner_content.get("blocks", [])
+                if inner_blocks:
+                    inner_result = editorjs_to_html_and_text(inner_blocks)
+                    if inner_result:
+                        inner_html, inner_txt = inner_result
+                        html_parts.append(
+                            f'<div class="callout">{inner_html}</div>'
+                        )
+                        text_parts.append(inner_txt)
 
         # ── Table ──────────────────────────────────────────────────────────
         elif btype == "table":
             rows = data.get("content", [])
             with_headings = data.get("withHeadings", False)
-            if rows:
+            if isinstance(rows, list) and rows:
                 thead, tbody_rows = "", rows
                 if with_headings and rows:
                     hcells = "".join(f"<th>{c}</th>" for c in rows[0])
@@ -572,14 +610,19 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                     checked = item.get("checked", False) if isinstance(item, dict) else False
                     content = item.get("content", item) if isinstance(item, dict) else item
                     mark = "[x]" if checked else "[ ]"
-                    text_parts.append(f"  {mark} {html_to_plain_text(_item_text(item))}")
+                    text_parts.append(f"  {mark} {html_to_plain_text(str(content))}")
 
         # ── Generic fallback ────────────────────────────────────────────────
         else:
-            raw = data.get("text", "") or data.get("content", "") or data.get("message", "")
-            if raw:
+            raw = data.get("text", "") or data.get("message", "")
+            # Only use data.content if it's a string (avoid stringifying dicts)
+            if not raw:
+                c = data.get("content", "")
+                if isinstance(c, str):
+                    raw = c
+            if raw and isinstance(raw, str):
                 html_parts.append(f"<p>{raw}</p>")
-                text_parts.append(html_to_plain_text(str(raw)))
+                text_parts.append(html_to_plain_text(raw))
 
     # ── Assemble ─────────────────────────────────────────────────────────────
     combined_html = "\n".join(html_parts)
@@ -588,6 +631,25 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
     if combined_text.strip():
         return combined_html, combined_text
     return None
+
+
+def ensure_parsed_html(raw_content: str) -> str:
+    """If raw_content looks like JSON (Editor.js blocks), parse it into HTML.
+
+    Returns proper HTML in all cases — either parsed from JSON or the original
+    string if it's already HTML or plain text.
+    """
+    stripped = raw_content.strip()
+    # Quick check: does it look like JSON?
+    if stripped.startswith(("[", "{")):
+        try:
+            payload = json.loads(stripped)
+            result = editorjs_to_html_and_text(payload)
+            if result:
+                return result[0]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return raw_content
 
 
 def fetch_text_lesson_content(
@@ -1024,7 +1086,7 @@ def download_course(
                     asset_name=asset.name,
                     filepath=str(html_file_path),
                 )
-                save_html_asset(html_file_path, asset.name, html_text)
+                save_html_asset(html_file_path, asset.name, ensure_parsed_html(html_text))
                 log_event(
                     "lesson_html_done",
                     section_index=i,
