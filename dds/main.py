@@ -5,6 +5,9 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup  # pyright: ignore[reportMissingImports]
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 from download_single_course import download_course, download_course_resource
 from clean_downloaded_files import clean_directory
@@ -92,11 +95,13 @@ def get_course_links_from_input(input_data: dict[str, Any]) -> list[str]:
         return [single_course_url]
 
     if isinstance(course_urls, list):
-        return [
-            url
-            for url in course_urls
-            if isinstance(url, str) and url and is_downloadable_course_url(url)
-        ]
+        seen: set[str] = set()
+        result: list[str] = []
+        for url in course_urls:
+            if isinstance(url, str) and url and is_downloadable_course_url(url) and url not in seen:
+                seen.add(url)
+                result.append(url)
+        return result
 
     return []
 
@@ -138,31 +143,65 @@ if __name__ == "__main__":
     quality = cast(str, input_data["quality"])
     log_event("download_batch_start", courses=len(all_course_link), quality=quality)
 
-    for index, course_url in enumerate(all_course_link, start=1):
-        try:
-            log_event(
-                "course_start",
-                index=index,
-                total=len(all_course_link),
-                course_url=course_url,
+    console = Console()
+    console.print(Panel.fit(
+        f"[bold cyan]dds[/bold cyan]  ·  365 Course Downloader"
+        f"  ·  [bold]{len(all_course_link)}[/bold] course(s)  ·  [bold]{quality}[/bold]",
+        border_style="cyan",
+    ))
+
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=26, complete_style="cyan", finished_style="green"),
+        TextColumn("[dim]{task.fields[note]}[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+        redirect_stdout=False,
+        redirect_stderr=False,
+    ) as progress:
+        total = len(all_course_link)
+        course_task = progress.add_task(
+            f"[bold cyan]● Courses  [0/{total}][/bold cyan]",
+            total=total,
+            note="",
+        )
+
+        for index, course_url in enumerate(all_course_link, start=1):
+            course_slug = course_url.strip("/").split("/").pop()
+            progress.update(
+                course_task,
+                description=f"[bold cyan]● Courses  [{index}/{total}][/bold cyan]",
+                note=course_slug,
             )
-            # Resources and videos are separated because some courses expose only one of them.
-            download_course_resource(
-                course_url=course_url, authorization_token=authorization_token
-            )
-            download_course(
-                course_url=course_url,
-                authorization_token=authorization_token,
-                policy_key=policy_key,
-                quality=quality,
-            )
-            log_event("course_done", index=index, course_url=course_url)
-        except Exception as exc:
-            # Continue batch processing on per-course failures.
-            log_event(
-                "course_error", index=index, course_url=course_url, error=str(exc)
-            )
-            print(f"Failed to download course {course_url}: {exc}")
+            try:
+                log_event(
+                    "course_start",
+                    index=index,
+                    total=len(all_course_link),
+                    course_url=course_url,
+                )
+                # Resources and videos are separated because some courses expose only one of them.
+                download_course_resource(
+                    course_url=course_url, authorization_token=authorization_token
+                )
+                download_course(
+                    course_url=course_url,
+                    authorization_token=authorization_token,
+                    policy_key=policy_key,
+                    quality=quality,
+                    progress=progress,
+                    course_task_id=course_task,
+                )
+                log_event("course_done", index=index, course_url=course_url)
+            except Exception as exc:
+                # Continue batch processing on per-course failures.
+                log_event(
+                    "course_error", index=index, course_url=course_url, error=str(exc)
+                )
+                progress.console.print(f"[red]⚠️  Failed:[/red] {course_url}\n   {exc}")
+            finally:
+                progress.advance(course_task)
 
     # Final pass: clean up any files that were downloaded with raw stringified EditorJS JSON
     downloads_dir = Path.home() / "Downloads" / "365DataScience"

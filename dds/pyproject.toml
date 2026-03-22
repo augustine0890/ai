@@ -7,5 +7,6 @@ dependencies = [
     "imageio-ffmpeg>=0.6.0",
     "pydantic<2",
     "requests>=2.32.5",
+    "rich>=13.7.0",
     "yt-dlp>=2026.3.17",
 ]

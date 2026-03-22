@@ -795,12 +795,15 @@ def request_lecture_html(
 
 
 def download_video_from_stream_url(
-    video_stream_url: str, filepath: str, quality: str
+    video_stream_url: str, filepath: str, quality: str,
+    progress: Any = None, task_id: Any = None,
 ) -> None:
     """Download a video from stream url
     :param video_stream_url: stream url
     :param filepath: file path where to download
     :param quality: quality to select
+    :param progress: optional rich Progress instance for live progress display
+    :param task_id: task ID within progress for this video download
     """
     quality_limit = "".join(ch for ch in quality if ch.isdigit()) or "1080"
     ffmpeg_exe = shutil.which("ffmpeg")
@@ -841,6 +844,33 @@ def download_video_from_stream_url(
         ydl_opts["ffmpeg_location"] = ffmpeg_exe
     else:
         ydl_opts["format"] = f"best[height<={quality_limit}]/best"
+
+    # When a rich progress bar is active, hook into yt-dlp progress and suppress
+    # its own output so the two displays don't conflict.
+    if progress is not None and task_id is not None:
+        def _ytdlp_hook(d: dict) -> None:
+            if d["status"] == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                done = d.get("downloaded_bytes", 0)
+                speed = d.get("speed") or 0
+                eta = d.get("eta")
+                speed_str = f"{speed / 1_048_576:.1f} MiB/s" if speed else "…"
+                eta_int = int(eta) if eta else 0
+                eta_str = f"  eta {eta_int // 60:02d}:{eta_int % 60:02d}" if eta else ""
+                progress.update(
+                    task_id,
+                    completed=done,
+                    total=max(total, 1),
+                    visible=True,
+                    description=f"[yellow]      ▶  {speed_str}{eta_str}[/yellow]",
+                    note="",
+                )
+            elif d["status"] == "finished":
+                progress.update(task_id, visible=False, description="[yellow]      ▶[/yellow]")
+
+        ydl_opts["quiet"] = True
+        ydl_opts["no_warnings"] = True
+        ydl_opts["progress_hooks"] = [_ytdlp_hook]
 
     log_event(
         "video_download_start",
@@ -1003,7 +1033,12 @@ def request_brightcove_api(
 
 
 def download_course(
-    course_url: str, authorization_token: str, policy_key: str, quality: str
+    course_url: str,
+    authorization_token: str,
+    policy_key: str,
+    quality: str,
+    progress: Any = None,
+    course_task_id: Any = None,
 ) -> None:
     course_slug = course_url.strip("/").split("/").pop()
     api_base_url = get_api_base_url(course_url)
@@ -1022,6 +1057,31 @@ def download_course(
         section_count=len(course_data.sections),
     )
 
+    # ── Progress tasks for this course ───────────────────────────────────────
+    total_sections = len(course_data.sections)
+    total_assets = sum(len(s.assets) for s in course_data.sections)
+    section_task = None
+    asset_task = None
+    video_task = None
+    if progress is not None:
+        section_task = progress.add_task(
+            f"[green]  ▸ Sections  [0/{total_sections}][/green]",
+            total=total_sections,
+            note="",
+        )
+        asset_task = progress.add_task(
+            f"[blue]      [0/{total_assets}][/blue]",
+            total=total_assets,
+            note="",
+        )
+        video_task = progress.add_task(
+            "[yellow]      ▶[/yellow]",
+            total=1,
+            note="",
+            visible=False,
+        )
+
+    assets_done = 0
     for i, section in enumerate(course_data.sections, start=1):
         log_event(
             "section_start",
@@ -1029,7 +1089,22 @@ def download_course(
             section_name=section.name,
             asset_count=len(section.assets),
         )
+        if progress is not None and section_task is not None:
+            progress.update(
+                section_task,
+                description=f"[green]  ▸ [{i}/{total_sections}][/green]  {section.name[:46]}",
+                note="",
+            )
+
         for j, asset in enumerate(section.assets, start=1):
+            global_asset_num = assets_done + j
+            if progress is not None and asset_task is not None:
+                progress.update(
+                    asset_task,
+                    description=f"[blue]      [{global_asset_num}/{total_assets}][/blue]  {asset.name[:40]}",
+                    note="",
+                )
+
             # ----------------------------------------------------------------
             # 1. Video download (lesson assets that carry a video)
             # ----------------------------------------------------------------
@@ -1042,22 +1117,37 @@ def download_course(
                     / f"{i} - {normalize_name(section.name)}"
                     / f"{j} - {normalize_name(asset.name)}"
                 )
-                video_item = cast(VideoItem, asset.video)
-                log_event(
-                    "lesson_video_start",
-                    section_index=i,
-                    asset_index=j,
-                    asset_name=asset.name,
-                    ext_id=video_item.ext_id,
-                )
-                video_data = request_brightcove_api(
-                    video_item.ext_id, policy_key, learn_base_url
-                )
-                source = video_data.sources.pop(0)
-                master_m3u8_url = source.src
-                download_video_from_stream_url(
-                    master_m3u8_url, str(file_path), quality
-                )
+                existing_video = file_path.with_suffix(".mp4")
+                if existing_video.exists():
+                    log_event(
+                        "lesson_video_skip",
+                        section_index=i,
+                        asset_index=j,
+                        asset_name=asset.name,
+                        reason="file already exists",
+                    )
+                    if progress is None:
+                        print(f"    ⏭  [{j}] {asset.name}  (video already downloaded)")
+                    else:
+                        progress.update(asset_task, note="⏭ skipped")
+                else:
+                    video_item = cast(VideoItem, asset.video)
+                    log_event(
+                        "lesson_video_start",
+                        section_index=i,
+                        asset_index=j,
+                        asset_name=asset.name,
+                        ext_id=video_item.ext_id,
+                    )
+                    video_data = request_brightcove_api(
+                        video_item.ext_id, policy_key, learn_base_url
+                    )
+                    source = video_data.sources.pop(0)
+                    master_m3u8_url = source.src
+                    download_video_from_stream_url(
+                        master_m3u8_url, str(file_path), quality,
+                        progress=progress, task_id=video_task,
+                    )
 
             # ----------------------------------------------------------------
             # 2. API text / lecture HTML (all asset types)
@@ -1149,7 +1239,22 @@ def download_course(
                         asset_name=asset.name, asset_id=asset.id,
                     )
 
+            # Advance asset counter after all work for this asset is done
+            if progress is not None and asset_task is not None:
+                progress.advance(asset_task)
+
+        assets_done += len(section.assets)
+        # Advance section counter after all assets in this section are done
+        if progress is not None and section_task is not None:
+            progress.advance(section_task)
+
     log_event("download_course_done", course_url=course_url)
+
+    # Remove per-course tasks so the display stays clean for the next course
+    if progress is not None:
+        for task_id in (section_task, asset_task, video_task):
+            if task_id is not None:
+                progress.remove_task(task_id)
 
 
 def download_course_resource(course_url: str, authorization_token: str) -> None:
