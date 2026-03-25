@@ -5,6 +5,11 @@ A Python CLI tool that downloads videos, text lessons (HTML + TXT), and resource
 ---
 
 ## Table of Contents
+- `main.py`: crawls the course listing page and tries to download all discovered courses.
+- `download_single_course.py`: downloads videos, text lessons (HTML/TXT), and resources for a course.
+- `clean_downloaded_files.py`: post-processes downloaded HTML/TXT files to clean embedded Editor.js JSON payloads.
+- `compress_courses.py`: bundles each downloaded course into a separate `.zip` file with smart compression.
+- `course_model.py` and `video_model.py`: Pydantic models for API responses.
 
 1. [Requirements](#requirements)
 2. [Setup](#setup)
@@ -189,6 +194,29 @@ uv run python main.py
 ```
 
 `main.py` scrapes the `/courses` listing page, extracts all course links, and downloads each one in sequence. If the listing page is login-gated, it falls back to `course_url` / `course_urls` in `input.json`.
+
+## Course Compression
+
+Once certificates are downloaded, you can bundle each course into a single `.zip` archive for easy storage or sharing.
+
+Run the compression utility from the `dds` folder:
+
+```bash
+uv run python compress_courses.py
+```
+
+### Features
+- **Smart Compression**: Uses **LZMA** for text, HTML, and subtitles (maximum reduction) while using **STORE** for videos and images (since they are already compressed, this avoids bloating the file and saves CPU).
+- **Targeted Compression**: Pass a partial course name to compress only specific courses.
+- **Resource Stats**: Use `--list` to see course sizes and file counts before compressing.
+
+| Command | Action |
+|---|---|
+| `uv run python compress_courses.py` | Compress all courses in the output directory |
+| `uv run python compress_courses.py "Financial Markets"` | Compress only courses matching "Financial Markets" |
+| `uv run python compress_courses.py --list` | List available courses, file counts, and uncompressed sizes |
+
+## FFmpeg installation guide
 
 ### Download a single course
 
