@@ -8,7 +8,7 @@ A Python CLI tool that downloads videos, text lessons (HTML + TXT), and resource
 - `main.py`: crawls the course listing page and tries to download all discovered courses.
 - `download_single_course.py`: downloads videos, text lessons (HTML/TXT), and resources for a course.
 - `clean_downloaded_files.py`: post-processes downloaded HTML/TXT files to clean embedded Editor.js JSON payloads.
-- `compress_courses.py`: bundles each downloaded course into a separate `.zip` file with smart compression.
+- `compress_courses.py`: bundles each downloaded course into a `.zip` with smart compression; optionally transcodes videos to H.265 first.
 - `course_model.py` and `video_model.py`: Pydantic models for API responses.
 
 1. [Requirements](#requirements)
@@ -21,11 +21,12 @@ A Python CLI tool that downloads videos, text lessons (HTML + TXT), and resource
 4. [Running the downloader](#running-the-downloader)
 5. [Token expiry mid-run](#token-expiry-mid-run)
 6. [Output structure](#output-structure)
-7. [FFmpeg installation](#ffmpeg-installation)
-8. [Logs and debugging](#logs-and-debugging)
-9. [Troubleshooting](#troubleshooting)
-10. [Technical architecture](#technical-architecture)
-11. [Case study: fixing raw JSON in HTML files](#case-study-fixing-raw-json-in-html-files)
+7. [Course compression](#course-compression)
+8. [FFmpeg installation](#ffmpeg-installation)
+9. [Logs and debugging](#logs-and-debugging)
+10. [Troubleshooting](#troubleshooting)
+11. [Technical architecture](#technical-architecture)
+12. [Case study: fixing raw JSON in HTML files](#case-study-fixing-raw-json-in-html-files)
 
 ---
 
@@ -197,7 +198,7 @@ uv run python main.py
 
 ## Course Compression
 
-Once certificates are downloaded, you can bundle each course into a single `.zip` archive for easy storage or sharing.
+Once courses are downloaded, you can bundle each folder into a single `.zip` archive for easy storage or sharing.
 
 Run the compression utility from the `dds` folder:
 
@@ -205,16 +206,45 @@ Run the compression utility from the `dds` folder:
 uv run python compress_courses.py
 ```
 
-### Features
-- **Smart Compression**: Uses **LZMA** for text, HTML, and subtitles (maximum reduction) while using **STORE** for videos and images (since they are already compressed, this avoids bloating the file and saves CPU).
-- **Targeted Compression**: Pass a partial course name to compress only specific courses.
-- **Resource Stats**: Use `--list` to see course sizes and file counts before compressing.
+### Compression features
+
+- **Smart per-format compression** — three strategies applied automatically:
+  - **LZMA** for text, HTML, VTT/SRT subtitles, JSON, XML, CSV (60–90% size reduction)
+  - **STORE** (no compression) for already-compressed media: MP4, MKV, MP3, JPG, PNG, PDF, ZIP … (avoids bloating and wastes no CPU)
+  - **DEFLATE level 9** for everything else
+- **Partial name filter** — pass a partial name to compress only matching courses
+- **`--list` mode** — show file counts and uncompressed sizes before committing
+
+### Optional H.265 video transcoding (`--transcode`)
+
+Before zipping, `--transcode` re-encodes every eligible video file (`.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`) to H.265 using FFmpeg. This typically reduces lecture/screencast video size by **40–50%** before the zip is even created.
+
+**Hardware encoder auto-detection** — the tool probes available encoders in priority order and selects the fastest one that actually works on your machine:
+
+| Priority | Encoder | Platform |
+|---|---|---|
+| 1 | `hevc_nvenc` | NVIDIA GPU (Windows / Linux) |
+| 2 | `hevc_qsv` | Intel Quick Sync (Intel iGPU) |
+| 3 | `hevc_amf` | AMD GPU (Windows / Linux) |
+| 4 | `hevc_videotoolbox` | Apple Silicon / macOS |
+| 5 | `libx265` | Software fallback (always available, slowest) |
+
+Each candidate is verified with a short 1-second test encode before being committed. Videos already encoded in H.265/HEVC are skipped automatically.
+
+After all courses are processed, a transcoding summary table is printed showing per-course and total byte savings.
+
+### Commands
 
 | Command | Action |
 |---|---|
-| `uv run python compress_courses.py` | Compress all courses in the output directory |
-| `uv run python compress_courses.py "Financial Markets"` | Compress only courses matching "Financial Markets" |
-| `uv run python compress_courses.py --list` | List available courses, file counts, and uncompressed sizes |
+| `uv run python compress_courses.py` | Compress all courses |
+| `uv run python compress_courses.py "SQL"` | Compress only courses matching "SQL" |
+| `uv run python compress_courses.py --list` | List courses with file counts and sizes |
+| `uv run python compress_courses.py --transcode` | Transcode videos to H.265, then compress all courses |
+| `uv run python compress_courses.py --transcode "SQL"` | Transcode + compress matching course only |
+| `uv run python compress_courses.py --transcode --crf 28` | Transcode with custom CRF value (default: 26) |
+
+> **CRF guidance:** lower values = higher quality / larger file (18–24 for archival), higher values = smaller file / lower quality (28–32 for space-saving). Default 26 is a good balance for lecture content.
 
 ## FFmpeg installation guide
 
@@ -337,12 +367,12 @@ Every run writes structured logs to `trace.jsonl` (in the `dds/` folder) and pri
 | `seq` | Monotonic counter — use to reconstruct exact event order |
 | `session` | 8-character hex ID that groups all events from one run |
 | `level` | `INFO`, `WARN`, or `ERROR` — filter without reading event names |
-| `module` | `dds.main` (orchestration) or `dds.worker` (download internals) |
+| `module` | `dds.main`, `dds.worker`, `dds.compress`, `dds.clean`, or `dds.list` — identifies which script emitted the event |
 | `event` | Snake-case event name describing what happened |
 | `data` | All context fields (course URL, filepath, asset index, etc.) |
 | `error` | Present only on errors — the error message string |
 
-The file is automatically trimmed to the **500 most recent entries** so it stays readable without growing unbounded.
+The file is automatically trimmed to the **100 most recent entries** so it stays readable without growing unbounded.
 
 ### Sharing logs with an LLM for debugging
 
@@ -358,6 +388,8 @@ To debug a failed run, paste the relevant portion of `trace.jsonl` into your LLM
 
 Key events to look for when debugging:
 
+**Downloader events (`dds.main` / `dds.worker`)**
+
 | Event | Meaning |
 |---|---|
 | `course_error` | A whole course failed — check `error` field |
@@ -366,6 +398,43 @@ Key events to look for when debugging:
 | `text_lesson_api_skip` | `/course/text/{id}` returned non-200, asset skipped |
 | `resource_api_empty` | Course has no downloadable ZIP (normal for many courses) |
 | `video_download_start` / `done` | Video download lifecycle |
+
+**Compression / transcoding events (`dds.compress`)**
+
+| Event | Meaning |
+|---|---|
+| `compress_batch_start` / `compress_batch_done` | Overall zip run started / finished |
+| `compress_course_done` | One course zip completed — includes `original_bytes` / `compressed_bytes` |
+| `compress_course_error` | A course zip failed — check `message` field |
+| `transcode_batch_start` | Transcoding run started — includes encoder label and CRF |
+| `transcode_video_done` | One video transcoded — includes `original_bytes`, `new_bytes`, `saved_bytes` |
+| `transcode_course_done` | All videos in a course transcoded — totals `before_bytes` / `after_bytes` |
+| `transcode_ffmpeg_error` | FFmpeg exited non-zero — `stderr_tail` contains the last 400 chars of ffmpeg output |
+| `transcode_timeout` | FFmpeg exceeded the 1-hour per-file ceiling |
+| `transcode_zero_output` | FFmpeg exited 0 but produced an empty output file |
+| `transcode_rename_error` | Original deleted but rename of `.tmp.mp4` failed — file may be lost |
+| `transcode_file_missing_before` | Source file disappeared before transcoding started |
+| `transcode_file_missing_after` | Source file missing after a failed transcode attempt |
+
+**HTML/TXT repair events (`dds.clean`)**
+
+| Event | Meaning |
+|---|---|
+| `clean_batch_start` | Scan started — includes `base_dir` |
+| `clean_batch_done` | Scan finished — includes `repaired` count |
+| `clean_batch_error` | Base directory not found |
+| `clean_html_done` | One HTML file repaired — includes `file` path |
+| `clean_txt_done` | One TXT file repaired — includes `file` path |
+| `clean_file_error` | A file was skipped due to an exception |
+
+**Course listing events (`dds.list`)**
+
+| Event | Meaning |
+|---|---|
+| `list_fetch_start` | API call started — includes `api_base` and `free_only` |
+| `list_fetch_done` | API call succeeded — includes `total` course count |
+| `list_fetch_error` | API call failed — check `error` field |
+| `list_saved` | Output JSON written — includes `path` and `total` |
 
 ---
 

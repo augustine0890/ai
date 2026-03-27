@@ -1,8 +1,8 @@
 """Shared structured logger for the dds project.
 
 Each run gets a unique session_id so all events from one execution are
-grouped together. The JSONL file is kept to MAX_LINES (500) by trimming
-the oldest entries once the file exceeds TRIM_THRESHOLD (550).
+grouped together. The JSONL file is kept to MAX_LINES (100) by trimming
+the oldest entries once the file exceeds TRIM_THRESHOLD (110).
 
 LLM-optimised entry shape
 ─────────────────────────
@@ -33,8 +33,8 @@ from pathlib import Path
 from typing import Any
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-MAX_LINES: int = 500        # target line-count after a trim
-TRIM_THRESHOLD: int = 550   # only rewrite the file once we exceed this
+MAX_LINES: int = 100        # target line-count after a trim
+TRIM_THRESHOLD: int = 110   # only rewrite the file once we exceed this
 
 # ── Session state ──────────────────────────────────────────────────────────────
 _session_id: str = uuid.uuid4().hex[:8]

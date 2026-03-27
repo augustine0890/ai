@@ -16,6 +16,9 @@ from pathlib import Path
 from bs4 import BeautifulSoup  # pyright: ignore[reportMissingImports]
 
 from download_single_course import editorjs_to_html_and_text, save_html_asset
+from logger import log_event
+
+_MODULE = "dds.clean"
 
 
 # ── Block extraction ─────────────────────────────────────────────────────────
@@ -113,6 +116,7 @@ def _clean_html_file(fp: Path, base_dir: Path) -> bool:
     if modified:
         fp.write_text(content, encoding="utf-8")
         print(f"✨ Cleaned HTML: {fp.relative_to(base_dir)}")
+        log_event(_MODULE, "clean_html_done", file=str(fp.relative_to(base_dir)))
 
     return modified
 
@@ -146,6 +150,7 @@ def _clean_txt_file(fp: Path, base_dir: Path) -> bool:
     if modified:
         fp.write_text("\n".join(new_lines), encoding="utf-8")
         print(f"✨ Cleaned TXT: {fp.relative_to(base_dir)}")
+        log_event(_MODULE, "clean_txt_done", file=str(fp.relative_to(base_dir)))
 
     return modified
 
@@ -164,6 +169,7 @@ def clean_directory(base_dir: Path) -> int:
                 count += 1
         except Exception as exc:
             print(f"⚠️  Skipped {fp.name}: {exc}")
+            log_event(_MODULE, "clean_file_error", file=fp.name, error=exc)
     return count
 
 
@@ -172,7 +178,10 @@ if __name__ == "__main__":
 
     if downloads_dir.exists():
         print(f"Scanning {downloads_dir} for files to repair...")
+        log_event(_MODULE, "clean_batch_start", base_dir=str(downloads_dir))
         cleaned = clean_directory(downloads_dir)
         print(f"\nDone! Repaired {cleaned} files total.")
+        log_event(_MODULE, "clean_batch_done", repaired=cleaned)
     else:
         print(f"Could not find {downloads_dir}")
+        log_event(_MODULE, "clean_batch_error", error=f"Base directory not found: {downloads_dir}")

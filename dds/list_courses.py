@@ -27,6 +27,10 @@ from pathlib import Path
 
 import requests
 
+from logger import log_event
+
+_MODULE = "dds.list"
+
 
 BASE_URLS = {
     "datascience":     ("https://api.365datascience.com",     "https://learn.365datascience.com"),
@@ -84,13 +88,19 @@ def main() -> None:
     token = load_token(input_file)
 
     print(f"Fetching course catalogue from {api_base}...")
-    courses = fetch_all_courses(api_base, token)
+    log_event(_MODULE, "list_fetch_start", api_base=api_base, free_only=args.free)
+    try:
+        courses = fetch_all_courses(api_base, token)
+    except Exception as exc:
+        log_event(_MODULE, "list_fetch_error", api_base=api_base, error=exc)
+        raise
 
     if args.free:
         courses = [c for c in courses if c.get("free") or c.get("simpleFree")]
         print(f"Filtered to {len(courses)} free course(s).")
 
     urls = [build_url(c["slug"], learn_base) for c in courses if c.get("slug")]
+    log_event(_MODULE, "list_fetch_done", total=len(urls), free_only=args.free)
 
     result = {
         "total": len(urls),
@@ -100,6 +110,7 @@ def main() -> None:
 
     out_path = Path(__file__).parent / args.out
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    log_event(_MODULE, "list_saved", path=str(out_path), total=len(urls))
 
     print(f"Found {len(urls)} course(s). Saved to {out_path.name}")
     print("\nFirst 5 URLs:")
