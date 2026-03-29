@@ -8,7 +8,7 @@ A Python CLI tool that downloads videos, text lessons (HTML + TXT), and resource
 - `main.py`: crawls the course listing page and tries to download all discovered courses.
 - `download_single_course.py`: downloads videos, text lessons (HTML/TXT), and resources for a course.
 - `clean_downloaded_files.py`: post-processes downloaded HTML/TXT files to clean embedded Editor.js JSON payloads.
-- `compress_courses.py`: bundles each downloaded course into a `.zip` with smart compression; optionally transcodes videos to H.265 first.
+- `compress_courses.py`: bundles each downloaded course into a `.zip` saved to an `archives/` subfolder; supports batch mode, folder-state tagging, and optional H.265 transcoding.
 - `course_model.py` and `video_model.py`: Pydantic models for API responses.
 
 1. [Requirements](#requirements)
@@ -212,8 +212,14 @@ uv run python compress_courses.py
   - **LZMA** for text, HTML, VTT/SRT subtitles, JSON, XML, CSV (60–90% size reduction)
   - **STORE** (no compression) for already-compressed media: MP4, MKV, MP3, JPG, PNG, PDF, ZIP … (avoids bloating and wastes no CPU)
   - **DEFLATE level 9** for everything else
+- **Archives subfolder** — all `.zip` files are saved to `~/Downloads/365DataScience/archives/` instead of mixed into the course folders
+- **Folder tagging** — folders are renamed to track compression state, so you always know what has been processed at a glance in Finder/Explorer:
+  - `[•] Course Name` — currently being compressed (or interrupted mid-run)
+  - `[archived] Course Name` — compression complete; skipped automatically on next run
+  - If a run is interrupted, `[•]` folders are resumed on the next run; on failure the folder is renamed back to its original name for a clean retry
+- **Batch mode** — compress a fixed number of folders per run, useful when storage is limited
 - **Partial name filter** — pass a partial name to compress only matching courses
-- **`--list` mode** — show file counts and uncompressed sizes before committing
+- **`--list` mode** — show all courses with status indicators, file counts, and sizes
 
 ### Optional H.265 video transcoding (`--transcode`)
 
@@ -237,12 +243,40 @@ After all courses are processed, a transcoding summary table is printed showing 
 
 | Command | Action |
 |---|---|
-| `uv run python compress_courses.py` | Compress all courses |
+| `uv run python compress_courses.py` | Compress all pending courses |
+| `uv run python compress_courses.py --batch 5` | Compress only the next 5 pending courses |
 | `uv run python compress_courses.py "SQL"` | Compress only courses matching "SQL" |
-| `uv run python compress_courses.py --list` | List courses with file counts and sizes |
-| `uv run python compress_courses.py --transcode` | Transcode videos to H.265, then compress all courses |
+| `uv run python compress_courses.py --list` | List all courses with status, file counts, and sizes |
+| `uv run python compress_courses.py --transcode` | Transcode videos to H.265, then compress all pending courses |
 | `uv run python compress_courses.py --transcode "SQL"` | Transcode + compress matching course only |
 | `uv run python compress_courses.py --transcode --crf 28` | Transcode with custom CRF value (default: 26) |
+| `uv run python compress_courses.py --batch 3 --transcode` | Transcode + compress next 3 pending courses |
+
+#### Typical batch workflow (limited storage)
+
+```bash
+# First run: compress 5 courses
+uv run python compress_courses.py --batch 5
+
+# Folders renamed to "[archived] Course Name" — those are skipped next time.
+# Free up space (move/delete archives), then compress the next batch:
+uv run python compress_courses.py --batch 5
+
+# Check progress at any time:
+uv run python compress_courses.py --list
+```
+
+#### `--list` output example
+
+```
+Courses in ~/Downloads/365DataScience:  3 pending  ·  2 archived  ·  1 interrupted
+
+  📁 Python Basics          (42 files, 1.2 GB)
+  📁 SQL for Data Science   (38 files, 980.0 MB)
+  ⏳ [•] Statistics          (61 files, 2.1 GB)   ← interrupted, will resume
+  ✅ [archived] Excel Basics (29 files, 650.0 MB)
+  ✅ [archived] Power BI     (55 files, 1.8 GB)
+```
 
 > **CRF guidance:** lower values = higher quality / larger file (18–24 for archival), higher values = smaller file / lower quality (28–32 for space-saving). Default 26 is a good balance for lecture content.
 

@@ -65,6 +65,12 @@ TRANSCODE_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
 
 DEFAULT_CRF = 26
 
+# Folder name tags used to track compression state.
+# Folders with ARCHIVED_TAG are skipped on next run (already done).
+# Folders with COMPRESSING_TAG were interrupted mid-run and will be resumed.
+ARCHIVED_TAG = "[archived] "
+COMPRESSING_TAG = "[•] "
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -387,9 +393,14 @@ def transcode_course(
     return total_before, total_after
 
 
-def compress_course(course_dir: Path, out_dir: Path) -> Path:
-    """Zip a single course folder and return the path of the created zip."""
-    zip_path = out_dir / f"{course_dir.name}.zip"
+def compress_course(course_dir: Path, out_dir: Path, zip_name: str | None = None) -> Path:
+    """Zip a single course folder and return the path of the created zip.
+
+    zip_name: override the name used for the zip file and the root folder inside
+    the archive (useful when course_dir has a temporary tag in its name).
+    """
+    name = zip_name or course_dir.name
+    zip_path = out_dir / f"{name}.zip"
     all_files = [
         f for f in course_dir.rglob("*")
         if f.is_file() and not f.name.endswith(".tmp.mp4")
@@ -397,12 +408,13 @@ def compress_course(course_dir: Path, out_dir: Path) -> Path:
     total = len(all_files)
     original_size = sum(f.stat().st_size for f in all_files)
 
-    log(f"  '{course_dir.name}'  ({total} files, {human_size(original_size)} uncompressed)")
+    log(f"  '{name}'  ({total} files, {human_size(original_size)} uncompressed)")
 
     with zipfile.ZipFile(zip_path, "w") as zf:
         for i, file_path in enumerate(all_files, start=1):
             method, level = pick_compression(file_path)
-            arcname = file_path.relative_to(course_dir.parent)
+            # Use clean name as root folder inside the archive (strip any tags).
+            arcname = Path(name) / file_path.relative_to(course_dir)
             if method == zipfile.ZIP_DEFLATED:
                 zf.write(file_path, arcname, compress_type=method, compresslevel=level)
             else:
@@ -420,7 +432,21 @@ def compress_course(course_dir: Path, out_dir: Path) -> Path:
 
 
 def list_courses(base_dir: Path) -> list[Path]:
-    return sorted(d for d in base_dir.iterdir() if d.is_dir())
+    """Return course folders that are pending or interrupted (exclude archived and system dirs)."""
+    return sorted(
+        d for d in base_dir.iterdir()
+        if d.is_dir()
+        and d.name != "archives"
+        and ARCHIVED_TAG not in d.name
+    )
+
+
+def list_all_courses(base_dir: Path) -> list[Path]:
+    """Return all course folders including archived ones (used by --list)."""
+    return sorted(
+        d for d in base_dir.iterdir()
+        if d.is_dir() and d.name != "archives"
+    )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -429,6 +455,10 @@ def main() -> None:
     if not BASE_DIR.exists():
         print(f"❌  Base directory not found: {BASE_DIR}")
         sys.exit(1)
+
+    # Create archives folder for compressed files
+    archives_dir = BASE_DIR / "archives"
+    archives_dir.mkdir(exist_ok=True)
 
     args = sys.argv[1:]
     do_transcode = "--transcode" in args
@@ -445,22 +475,43 @@ def main() -> None:
             print("❌  --crf requires an integer value (e.g. --crf 28)")
             sys.exit(1)
 
-    courses = list_courses(BASE_DIR)
+    # Parse optional --batch N
+    batch_size: int | None = None
+    if "--batch" in args:
+        idx = args.index("--batch")
+        try:
+            batch_size = int(args[idx + 1])
+            args = args[:idx] + args[idx + 2:]
+        except (IndexError, ValueError):
+            print("❌  --batch requires an integer value (e.g. --batch 5)")
+            sys.exit(1)
 
-    # --list: show sizes then exit
+    # --list: show all courses with status then exit
     if "--list" in args:
-        if not courses:
+        all_dirs = list_all_courses(BASE_DIR)
+        if not all_dirs:
             print("No course folders found.")
             return
-        print(f"Found {len(courses)} course(s) in {BASE_DIR}:\n")
-        for c in courses:
+        archived = [d for d in all_dirs if ARCHIVED_TAG in d.name]
+        pending = [d for d in all_dirs if ARCHIVED_TAG not in d.name and COMPRESSING_TAG not in d.name]
+        interrupted = [d for d in all_dirs if COMPRESSING_TAG in d.name]
+        print(f"Courses in {BASE_DIR}:  {len(pending)} pending  ·  {len(archived)} archived  ·  {len(interrupted)} interrupted\n")
+        for c in all_dirs:
             files = [f for f in c.rglob("*") if f.is_file()]
             total_size = sum(f.stat().st_size for f in files)
-            print(f"  📁 {c.name}  ({len(files)} files, {human_size(total_size)})")
+            if ARCHIVED_TAG in c.name:
+                status = "✅"
+            elif COMPRESSING_TAG in c.name:
+                status = "⏳"
+            else:
+                status = "📁"
+            print(f"  {status} {c.name}  ({len(files)} files, {human_size(total_size)})")
         return
 
+    courses = list_courses(BASE_DIR)
+
     if not courses:
-        print("No course folders found.")
+        print("No pending courses found. All are archived or none exist.")
         return
 
     # Partial name filter
@@ -470,6 +521,11 @@ def main() -> None:
         if not courses:
             print(f"❌  No course matching '{query}' found.")
             sys.exit(1)
+
+    # Apply batch limit
+    if batch_size is not None:
+        courses = courses[:batch_size]
+        print(f"  Batch mode: processing {len(courses)} course(s) this run.\n")
 
     # ── Transcode phase ───────────────────────────────────────────────────────
     transcode_stats: list[tuple[str, int, int]] = []  # (name, before, after)
@@ -496,16 +552,40 @@ def main() -> None:
     total_compressed = 0
 
     for course_dir in courses:
+        # If folder already has COMPRESSING_TAG it was interrupted last run — resume it.
+        if COMPRESSING_TAG in course_dir.name:
+            original_name = course_dir.name.replace(COMPRESSING_TAG, "")
+            active_dir = course_dir
+            log(f"  ↩  '{original_name}'  (resuming interrupted compression)", "compress_course_resume")
+        else:
+            original_name = course_dir.name
+            active_dir = BASE_DIR / f"{COMPRESSING_TAG}{original_name}"
+            try:
+                course_dir.rename(active_dir)
+            except Exception as exc:
+                log(f"  ⚠️  Cannot rename '{original_name}': {exc}", "compress_rename_error")
+                continue
+
         try:
-            original = sum(f.stat().st_size for f in course_dir.rglob("*") if f.is_file())
-            zip_path = compress_course(course_dir, BASE_DIR)
+            original = sum(f.stat().st_size for f in active_dir.rglob("*") if f.is_file())
+            zip_path = compress_course(active_dir, archives_dir, zip_name=original_name)
             compressed = zip_path.stat().st_size
             total_original += original
             total_compressed += compressed
             created.append(zip_path)
-            _write_trace("compress_course_done", course=course_dir.name, original_bytes=original, compressed_bytes=compressed)
+            _write_trace("compress_course_done", course=original_name, original_bytes=original, compressed_bytes=compressed)
+
+            # Mark folder as archived
+            archived_dir = BASE_DIR / f"{ARCHIVED_TAG}{original_name}"
+            active_dir.rename(archived_dir)
+
         except Exception as exc:
-            log(f"  ⚠️  Failed: {course_dir.name} — {exc}", "compress_course_error")
+            # Restore original folder name so it can be retried next run
+            try:
+                active_dir.rename(BASE_DIR / original_name)
+            except Exception:
+                pass
+            log(f"  ⚠️  Failed: {original_name} — {exc}", "compress_course_error")
 
     overall_ratio = (1 - total_compressed / total_original) * 100 if total_original else 0
     print()
