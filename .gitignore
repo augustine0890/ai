@@ -69,6 +69,7 @@ data
 
 # Secrets and local config
 dds/input.json
+dds/.env
 
 # Go build artifacts and temporary files
 compress/compress
