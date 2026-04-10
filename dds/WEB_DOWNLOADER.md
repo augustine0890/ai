@@ -77,12 +77,16 @@ uv run python web_downloader.py
 | `HEADER_AUTHORIZATION` | If using Bearer token | `Bearer eyJhbGci...` |
 | `HEADER_*` | Optional | Any header: `HEADER_X_CUSTOM=value` |
 | `PLAYWRIGHT` | If SPA (Next.js/React) | `true` |
+| `PLAYWRIGHT_STORAGE_STATE` | Recommended fallback for hard auth | `./playwright_state.json` |
 | `WAIT_FOR` | For SPA content | `[class*="lesson"], article` |
+| `RENDER_SETTLE_MS` | For SPA auth/state hydration | `4000` |
+| `AUTO_AUTH_HEADER_FROM_COOKIE` | For cookie-only auth setups | `true` |
 | `MAX_PAGES` | Optional | Unset = unlimited download |
 | `THREADS` | Optional | Default `1` (safe for rate-limiting) |
 | `DESTINATION` | Optional | Defaults to hostname-based folder |
 | `DOWNLOAD_EXTERNAL_ASSETS` | Optional | `true` to localize CDN assets |
 | `EXTERNAL_DOMAINS` | Optional | `cdn.site.com fonts.googleapis.com` |
+| `USER_AGENT` | If using `cf_clearance` | Must match your browser's UA (see [cf_clearance and User-Agent](#cf_clearance-and-user-agent)) |
 
 **Defaults:**
 - `THREADS=1` (conservative, avoids rate limiting)
@@ -188,47 +192,119 @@ of the actual course content.
 
 #### Option B — From Application tab / Storage (pick individual values)
 
-Use this if Option A doesn't show the Cookie header clearly mostly because you've refreshed the DevTools.
+Use this if Option A doesn't show the Cookie header clearly (e.g. you've
+refreshed DevTools, or the Network tab is empty).
 
-1. DevTools → **Application** tab (Chrome / Edge) or **Storage** tab (Firefox).
-2. Left sidebar → expand **Cookies** → click your site domain (e.g., `https://bytebytego.com`).
-3. You will see a table of cookies. You must copy the **Value** for a few specific required cookies.
-4. Open your `.env` file and set the `COOKIE` variable like this:
-   ```env
-   COOKIE=token=PASTE_HERE; cf_clearance=PASTE_HERE; csrf-token=PASTE_HERE
+1. **Log in** to the site in your browser.
+2. DevTools → **Application** tab (Chrome / Edge) or **Storage** tab (Firefox).
+3. Left sidebar → expand **Cookies** → click your site domain
+   (e.g., `https://bytebytego.com`).
+4. You will see a table of cookie names on the right side. It looks like:
    ```
-5. In the DevTools table, find the row where the **Name** is `token`. Click that row, copy the long string from the **Value** column, and paste it into `.env` to replace the first `PASTE_HERE`.
-6. Find the row named `cf_clearance`. Copy its **Value** and paste it to replace the second `PASTE_HERE`.
-7. Find the row named `csrf-token`. Copy its **Value** and paste it to replace the third `PASTE_HERE`.
+   Name                    Value
+   ─────────────────────   ──────────────────
+   _ga                     GA1.1.1234567890
+   _ga_JPXSGYZ0D5          GS1.1.abc...
+   _tt_enable_cookie       1
+   _ttp                    abc123...
+   cf_clearance            VdiUXW3Zm...        ← COPY THIS VALUE
+   cookieyes-consent       ...
+   csrf-token              177578...           ← COPY THIS VALUE
+   token                   eyJhbGci...         ← COPY THIS VALUE
+   ttcsid                  ...
+   ```
+5. Click the row named **`token`**. Copy the long `eyJ...` string from the
+   **Value** column (double-click the value cell, or look at the detail panel
+   at the bottom of DevTools).
+6. Click the row named **`cf_clearance`**. Copy its **Value**.
+7. Click the row named **`csrf-token`**. Copy its **Value**.
+8. Open your `.env` file and paste all three values in this format:
+   ```env
+   COOKIE=token=PASTE_TOKEN_HERE; cf_clearance=PASTE_CF_HERE; csrf-token=PASTE_CSRF_HERE
+   ```
+   Replace each `PASTE_..._HERE` with the value you copied. Keep the
+   `token=`, `cf_clearance=`, and `csrf-token=` prefixes — only replace
+   the part after the `=`.
 
-> ⚠ **CRITICAL:** Do NOT wrap the values in quotes. Do NOT accidentally delete the `token=`, `cf_clearance=` or `csrf-token=` prefixes inside the `.env` file when pasting.
+> ⚠ **CRITICAL:** Do NOT wrap the value in quotes. Do NOT include the
+> `Cookie:` prefix. Do NOT accidentally delete the `token=`, `cf_clearance=`
+> or `csrf-token=` prefixes when pasting.
 
 #### Cookie reference for bytebytego.com
 
 Open `F12 → Application → Cookies → https://bytebytego.com` to see all of these:
 
-| Cookie name | Required? | Purpose |
-|---|---|---|
-| `token` | ✅ Yes | Login / session token |
-| `cf_clearance` | ✅ Yes | Cloudflare bot-challenge clearance (expires ~30 min) |
-| `csrf-token` | ✅ Yes | CSRF protection |
-| `_ga`, `_ga_JPXSGYZ0D5` | Optional | Google Analytics |
-| `_tt_enable_cookie`, `_ttp`, `ttcsid` | Optional | TikTok Pixel analytics |
-| `cookieyes-consent` | Optional | Cookie consent banner |
+| Cookie name | Required? | Expires | Purpose |
+|---|---|---|---|
+| `token` | ✅ Yes | ~1 hour (JWT `exp`) | Firebase login / session token |
+| `cf_clearance` | ⚠️ Maybe | ~30 minutes | Cloudflare bot-challenge clearance (see note below) |
+| `csrf-token` | ✅ Yes | Session | CSRF protection |
+| `_ga`, `_ga_JPXSGYZ0D5` | Optional | — | Google Analytics |
+| `_tt_enable_cookie`, `_ttp`, `ttcsid` | Optional | — | TikTok Pixel analytics |
+| `cookieyes-consent` | Optional | — | Cookie consent banner |
 
 > **Recommended:** Use Option A and copy the full cookie string — it includes
 > everything automatically and guarantees the correct format.
+>
+> **⚠ Cookies expire fast!** The `token` JWT expires in ~1 hour and
+> `cf_clearance` in ~30 minutes. If your download takes longer than that,
+> or if you get `auth_failed_fatal`, re-copy fresh cookies and re-run.
+> Already-downloaded files are skipped automatically.
+
+#### `cf_clearance` and User-Agent
+
+Cloudflare binds `cf_clearance` to the **exact User-Agent string** of the browser
+that solved the challenge. If the downloader sends a different User-Agent,
+Cloudflare rejects the request — even if the cookie itself is still valid.
+
+**Try without `cf_clearance` first.** Many sites work with just `token` + `csrf-token`.
+If Cloudflare blocks you, then include `cf_clearance` **and** set `USER_AGENT` in `.env`:
+
+```bash
+# In your browser: F12 → Console → type: navigator.userAgent → Enter → copy it
+USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36
+```
+
+This ensures the downloader's User-Agent matches what Cloudflare expects.
+
+If `COOKIE` includes `cf_clearance` but `USER_AGENT` is not set, the downloader
+now auto-ignores `cf_clearance` and logs `cf_clearance_ignored_no_user_agent`
+to avoid common false auth failures from UA mismatch.
 
 #### Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `auth_failed_fatal` on first page | Cookies expired or UA mismatch | Re-copy fresh cookies; if using `cf_clearance`, set `USER_AGENT` |
+| `cf_clearance_ignored_no_user_agent` in log | `cf_clearance` present but no `USER_AGENT` set | Add `USER_AGENT` from browser DevTools if you intentionally need `cf_clearance` |
 | Downloading the login/redirect page | Missing or expired cookie | Re-copy fresh cookies and re-run |
 | `403 Forbidden` on every page | Cookie format wrong | Check: no `Cookie:` prefix, no quotes |
 | Works briefly then fails | `cf_clearance` or session expired | Re-copy from DevTools and re-run (existing files are skipped) |
 | Some pages redirect, others work | Only some cookies copied | Use Option A to copy the full string |
+| `_debug_auth_fail.html` created | Auth check failed | Open the debug file in a browser to see what Playwright actually received |
+| Cookie/header setup still shows guest page | Site also depends on browser localStorage auth state | Use `PLAYWRIGHT_STORAGE_STATE` from a real logged-in browser session |
 
 ---
+
+### Playwright storage_state fallback (recommended for hard auth)
+
+Some SPAs authenticate using data in browser storage (not only request cookies/headers).
+When this happens, use a real Playwright `storage_state` file.
+
+1. Generate state from a logged-in browser session:
+   ```bash
+   cd dds
+   uv run python capture_playwright_state.py --output playwright_state.json
+   ```
+2. Log in in the opened browser window and confirm paid course content is visible.
+3. Press Enter in terminal to save state.
+4. Set in `.env`:
+   ```env
+   PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+   ```
+   With storage_state enabled, downloader avoids overlaying Playwright with
+   `COOKIE`-derived auth headers/cookies to prevent stale-token conflicts.
+5. Run downloader again.
 
 ### Getting `HEADER_AUTHORIZATION` (Bearer token)
 
@@ -567,6 +643,9 @@ lesson body has finished rendering. Good selectors for ByteByteGo:
 
 Default is `body` (always present but may be too early for SPAs).
 
+`RENDER_SETTLE_MS` adds a fixed delay after `WAIT_FOR` before HTML extraction.
+For auth-heavy SPAs, this helps avoid capturing a transient guest-state DOM.
+
 ---
 
 ## All CLI flags
@@ -584,7 +663,10 @@ All of these can be set in `.env` file (recommended) or via CLI (for quick overr
 | `--cookie` | `COOKIE` | — | Cookie string from browser DevTools |
 | `--header` | `HEADER_*` | — | Extra request header (repeatable) |
 | `--playwright` | `PLAYWRIGHT` | off | Render JS before saving HTML |
+| `--playwright-storage-state` | `PLAYWRIGHT_STORAGE_STATE` | — | Load Playwright storage_state JSON (cookies + localStorage) |
 | `--wait-for` | `WAIT_FOR` | `body` | CSS selector Playwright waits for |
+| `--render-settle-ms` | `RENDER_SETTLE_MS` | `4000` | Extra wait after `WAIT_FOR` before snapshot |
+| `--auto-auth-header-from-cookie` | `AUTO_AUTH_HEADER_FROM_COOKIE` | on | Auto-add `Authorization: Bearer <token-cookie>` when missing |
 | `--download-external-assets` | `DOWNLOAD_EXTERNAL_ASSETS` | off | Download and localize CDN/external assets |
 | `--external-domains` | `EXTERNAL_DOMAINS` | — | Space-separated whitelist of CDN domains |
 

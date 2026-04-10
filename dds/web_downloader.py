@@ -455,6 +455,32 @@ def _protocol_fix(url: str, base_url: str) -> str:
     return url
 
 
+def parse_cookie_header(cookie_header: str) -> list[tuple[str, str]]:
+    """
+    Parse a Cookie header value into (name, value) pairs.
+
+    Input example:
+      "token=abc; cf_clearance=xyz; csrf-token=123"
+
+    Notes:
+    - Splits on ';' and first '=' in each segment.
+    - Preserves cookie value as-is (except surrounding whitespace).
+    - Skips malformed segments.
+    """
+    pairs: list[tuple[str, str]] = []
+    for raw in cookie_header.split(";"):
+        raw = raw.strip()
+        if not raw or "=" not in raw:
+            continue
+        k, v = raw.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            continue
+        pairs.append((k, v))
+    return pairs
+
+
 def rewrite_css_text(
     css_text: str,
     base_url: str,
@@ -724,6 +750,7 @@ def fetch_html_rendered(
     url: str,
     context: "BrowserContext",
     wait_for: str = "body",
+    render_settle_ms: int = 4000,
 ) -> Optional[BeautifulSoup]:
     """
     Render a page with a headless Chromium browser and return the post-JS DOM.
@@ -746,6 +773,13 @@ def fetch_html_rendered(
             page.wait_for_selector(wait_for, timeout=15_000)
         except Exception:
             _log("selector_missing_warn", selector=wait_for, url=url)
+        # Give SPA auth/bootstrap calls time to update DOM state.
+        try:
+            page.wait_for_load_state("networkidle", timeout=max(1_000, render_settle_ms))
+        except Exception:
+            _log("networkidle_timeout_warn", url=url, waited_ms=max(1_000, render_settle_ms))
+        if render_settle_ms > 0:
+            page.wait_for_timeout(render_settle_ms)
         html = page.content()
         return BeautifulSoup(html, "html.parser")
     except Exception as exc:  # noqa: BLE001
@@ -1382,7 +1416,26 @@ def crawl_site(
             continue
 
         if auth_fail_text and auth_fail_text in soup.get_text():
-            _log("auth_failed_fatal", url=page_url, reason=f"Found '{auth_fail_text}'")
+            # Dump the HTML Playwright received so the user can diagnose the issue
+            debug_path = root / "_debug_auth_fail.html"
+            create_dir(root)
+            debug_path.write_text(str(soup), encoding="utf-8")
+            page_text = soup.get_text(" ", strip=True)
+            lock_icon_count = len(
+                soup.find_all(
+                    "img",
+                    src=lambda v: isinstance(v, str) and "lock" in v.lower(),
+                )
+            )
+            _log(
+                "auth_failed_fatal",
+                url=page_url,
+                reason=f"Found '{auth_fail_text}'",
+                debug_html=str(debug_path),
+                login_marker=(" login " in f" {page_text.lower()} "),
+                unlock_marker=(auth_fail_text.lower() in page_text.lower()),
+                lock_icons=lock_icon_count,
+            )
             sys.exit(1)
 
         # ── Next.js __NEXT_DATA__ discovery ───────────────────────────────────
@@ -1704,12 +1757,16 @@ def parse_args() -> argparse.Namespace:
       COOKIE                    Full Cookie header string from browser DevTools
       HEADER_<NAME>             One header per var, e.g. HEADER_AUTHORIZATION=Bearer eyJ...
       PLAYWRIGHT                true/1/yes to enable headless Chromium rendering
+      PLAYWRIGHT_STORAGE_STATE  Path to Playwright storage_state JSON (cookies + localStorage)
       WAIT_FOR                  CSS selector to wait for before extracting HTML
+      RENDER_SETTLE_MS          Extra wait after selector (helps SPA auth state settle)
+      AUTO_AUTH_HEADER_FROM_COOKIE true/false (derive Bearer from token cookie)
       MAX_PAGES                 Max pages (unset = unlimited)
       THREADS                   Concurrent workers (default 1)
       DESTINATION               Output folder
       DOWNLOAD_EXTERNAL_ASSETS  true/1/yes to download CDN assets
       EXTERNAL_DOMAINS          Space-separated list of allowed CDN domains
+      USER_AGENT                Browser UA string (recommended with cf_clearance)
     """
     from dotenv import load_dotenv
     load_dotenv()
@@ -1718,7 +1775,12 @@ def parse_args() -> argparse.Namespace:
     env_url = os.getenv("URL", "")
     env_cookie = os.getenv("COOKIE")
     env_playwright = os.getenv("PLAYWRIGHT", "").lower() in ("1", "true", "yes")
+    env_playwright_storage_state = os.getenv("PLAYWRIGHT_STORAGE_STATE") or None
     env_wait_for = os.getenv("WAIT_FOR", "body")
+    _settle = os.getenv("RENDER_SETTLE_MS", "4000")
+    env_render_settle_ms = int(_settle) if _settle.strip().isdigit() else 4000
+    env_auto_auth_header = os.getenv("AUTO_AUTH_HEADER_FROM_COOKIE", "true").lower() in ("1", "true", "yes")
+    env_user_agent = os.getenv("USER_AGENT") or None
     env_destination = os.getenv("DESTINATION") or None
 
     _max = os.getenv("MAX_PAGES", "")
@@ -1816,10 +1878,30 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--playwright-storage-state",
+        default=env_playwright_storage_state,
+        metavar="JSON_PATH",
+        help=(
+            "Path to Playwright storage_state JSON exported from a logged-in browser session. "
+            "Includes cookies + localStorage and is often more reliable than manual COOKIE= alone. "
+            "Can be set via PLAYWRIGHT_STORAGE_STATE= in .env."
+        ),
+    )
+    p.add_argument(
         "--wait-for",
         default=env_wait_for,
         metavar="CSS_SELECTOR",
         help="CSS selector Playwright waits for before extracting HTML. Set via WAIT_FOR= in .env.",
+    )
+    p.add_argument(
+        "--render-settle-ms",
+        type=int,
+        default=env_render_settle_ms,
+        metavar="MS",
+        help=(
+            "Extra time (ms) to wait after WAIT_FOR before extracting HTML. "
+            "Helps SPAs finish auth/state hydration. Set via RENDER_SETTLE_MS= in .env."
+        ),
     )
     p.add_argument(
         "--url-prefix",
@@ -1859,6 +1941,27 @@ def parse_args() -> argparse.Namespace:
             "Can be set via SEED_URLS= (space/newline-separated) in .env."
         ),
     )
+    p.add_argument(
+        "--auto-auth-header-from-cookie",
+        action=argparse.BooleanOptionalAction,
+        default=env_auto_auth_header,
+        help=(
+            "Auto-add Authorization: Bearer <token-cookie> when COOKIE contains token= "
+            "and no explicit Authorization header is provided. "
+            "Can be set via AUTO_AUTH_HEADER_FROM_COOKIE= in .env."
+        ),
+    )
+    p.add_argument(
+        "--user-agent",
+        default=env_user_agent,
+        metavar="UA",
+        help=(
+            "Override the User-Agent for both requests and Playwright. "
+            "IMPORTANT: if you include cf_clearance in --cookie, the UA MUST match "
+            "the browser that generated that cookie, otherwise Cloudflare rejects it. "
+            "Can be set via USER_AGENT= in .env."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1872,14 +1975,52 @@ if __name__ == "__main__":
         _log("arg_error", arg="--threads", error="must be >= 1")
         sys.exit(2)
 
+    # --- User-Agent: must be consistent across requests + Playwright ----------
+    # Cloudflare's cf_clearance cookie is bound to the User-Agent that solved
+    # the challenge. A mismatch causes Cloudflare to reject the request.
+    effective_ua = args.user_agent or DEFAULT_HEADERS["User-Agent"]
+    SESSION.headers["User-Agent"] = effective_ua
+    if args.user_agent:
+        _log("user_agent_override", ua=effective_ua)
+
+    # --- Auth cookies: normalize + guard cf_clearance/UA mismatch ------------
+    cookie_pairs = parse_cookie_header(args.cookie) if args.cookie else []
+    has_cf_clearance = any(k.lower() == "cf_clearance" for k, _ in cookie_pairs)
+    if has_cf_clearance and not args.user_agent:
+        # Cloudflare binds cf_clearance to the exact UA that solved challenge.
+        # If USER_AGENT is not explicitly provided, this cookie commonly causes
+        # false auth failures, so drop it by default.
+        cookie_pairs = [(k, v) for k, v in cookie_pairs if k.lower() != "cf_clearance"]
+        _log(
+            "cf_clearance_ignored_no_user_agent",
+            hint="Set USER_AGENT from browser if you need cf_clearance",
+        )
+    elif has_cf_clearance and args.user_agent:
+        _log("cf_clearance_with_user_agent", ua_bound=True)
+
+    # If token cookie is present, many SPAs expect Authorization Bearer header
+    # on API calls. Auto-derive it unless user already provided one.
+    has_auth_header = any(
+        ":" in raw and raw.split(":", 1)[0].strip().lower() == "authorization"
+        for raw in args.header
+    )
+    if (
+        args.auto_auth_header_from_cookie
+        and not has_auth_header
+        and not args.playwright_storage_state
+    ):
+        token_cookie = next((v for k, v in cookie_pairs if k.lower() == "token"), None)
+        if token_cookie:
+            args.header.append(f"Authorization: Bearer {token_cookie}")
+            _log("auth_header_from_token_cookie")
+    elif args.auto_auth_header_from_cookie and args.playwright_storage_state:
+        _log("auth_header_from_cookie_skipped_storage_state")
+
     # --- Auth: inject cookies and headers into the shared requests SESSION ---
-    if args.cookie:
-        for pair in args.cookie.split(";"):
-            pair = pair.strip()
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-                SESSION.cookies.set(k.strip(), v.strip())
-        _log("session_cookies_injected")
+    if cookie_pairs:
+        for k, v in cookie_pairs:
+            SESSION.cookies.set(k, v)
+        _log("session_cookies_injected", count=len(cookie_pairs), names=[k for k, _ in cookie_pairs])
 
     headers_injected = []
     for raw_header in args.header:
@@ -1919,21 +2060,21 @@ if __name__ == "__main__":
         _pw_stack = sync_playwright().__enter__()
         browser = _pw_stack.chromium.launch(headless=True)
 
-        # Build the Playwright cookie list from --cookie string
+        # Build the Playwright cookie list from --cookie string.
+        # If storage_state is used, avoid overriding it with possibly stale .env cookies.
         pw_cookies = []
-        if args.cookie:
+        if cookie_pairs and not args.playwright_storage_state:
             parsed_start = urlparse(args.url)
             domain = parsed_start.hostname or ""
-            for pair in args.cookie.split(";"):
-                pair = pair.strip()
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    pw_cookies.append({
-                        "name": k.strip(),
-                        "value": v.strip(),
-                        "domain": domain,
-                        "path": "/",
-                    })
+            for k, v in cookie_pairs:
+                pw_cookies.append({
+                    "name": k,
+                    "value": v,
+                    "domain": domain,
+                    "path": "/",
+                })
+        elif cookie_pairs and args.playwright_storage_state:
+            _log("playwright_cookie_overlay_skipped_storage_state")
 
         # Build extra HTTP headers for Playwright from --header args
         pw_headers = {}
@@ -1942,14 +2083,28 @@ if __name__ == "__main__":
                 k, v = raw_header.split(":", 1)
                 pw_headers[k.strip()] = v.strip()
 
-        pw_context = browser.new_context(extra_http_headers=pw_headers if pw_headers else None)
+        context_kwargs = {
+            "user_agent": effective_ua,
+            "extra_http_headers": pw_headers if pw_headers else None,
+        }
+
+        if args.playwright_storage_state:
+            state_path = Path(args.playwright_storage_state)
+            if not state_path.exists():
+                _log("arg_error", arg="--playwright-storage-state", error=f"file not found: {state_path}")
+                sys.exit(2)
+            context_kwargs["storage_state"] = str(state_path)
+            _log("playwright_storage_state_loaded", path=str(state_path))
+
+        pw_context = browser.new_context(**context_kwargs)
         if pw_cookies:
             pw_context.add_cookies(pw_cookies)
-            _log("playwright_cookies_injected", count=len(pw_cookies))
+            _log("playwright_cookies_injected", count=len(pw_cookies), names=[c["name"] for c in pw_cookies])
 
         wait_for = args.wait_for
-        fetch_fn = lambda url: fetch_html_rendered(url, pw_context, wait_for)  # noqa: E731
-        _log("playwright_mode_start", wait_for=wait_for)
+        render_settle_ms = max(0, args.render_settle_ms)
+        fetch_fn = lambda url: fetch_html_rendered(url, pw_context, wait_for, render_settle_ms)  # noqa: E731
+        _log("playwright_mode_start", wait_for=wait_for, render_settle_ms=render_settle_ms)
 
     try:
         # Kick off crawl
