@@ -24,8 +24,9 @@ produces a fully browsable offline copy you can open in any browser.
    - `URL_PREFIX` — restrict crawling to a path subtree (e.g. `/courses/`)
    - `COOKIE` — from DevTools Network tab (see [Getting cookies](#getting-cookie))
    - `PLAYWRIGHT=true` — if the site is a JavaScript SPA (Next.js, React, etc.)
+   - `PLAYWRIGHT_PAGE_FETCH=false` — recommended for protected Next.js course sites like ByteByteGo
    - `WAIT_FOR` — for SPAs, a CSS selector for the lesson/content area
-   - `SEED_URLS` — for sites where chapters have no `<a>` links (see [Seed URLs](#seed-urls--sites-with-no-a-href-chapter-links))
+   - `DISCOVER_CHAPTERS=true` — for JS-driven course navigation
 
 4. **Run:**
    ```bash
@@ -45,12 +46,13 @@ That's it. Everything is configured via `.env` — no CLI args needed. All value
    - [Getting cookies](#getting-cookie)
    - [Getting a Bearer token (Authorization header)](#getting-header_authorization-bearer-token)
 5. [Crawl scoping: URL_PREFIX](#crawl-scoping-url_prefix)
-6. [Seed URLs — sites with no `<a href>` chapter links](#seed-urls--sites-with-no-a-href-chapter-links)
-7. [Example .env files](#example-env-files)
-8. [ByteByteGo / Next.js SPA — Playwright mode](#bytebytego--nextjs-spa--playwright-mode)
-9. [All CLI flags](#all-cli-flags)
-10. [Output structure](#output-structure)
-11. [Limitations](#limitations)
+6. [Chapter auto-discovery](#chapter-auto-discovery)
+7. [Seed URLs — sites with no `<a href>` chapter links](#seed-urls--sites-with-no-a-href-chapter-links)
+8. [Example .env files](#example-env-files)
+9. [ByteByteGo / Next.js SPA — Playwright mode](#bytebytego--nextjs-spa--playwright-mode)
+10. [All CLI flags](#all-cli-flags)
+11. [Output structure](#output-structure)
+12. [Limitations](#limitations)
 
 ---
 
@@ -71,27 +73,58 @@ uv run python web_downloader.py
 | Variable | Required | Example |
 |---|---|---|
 | `URL` | Yes | `https://bytebytego.com/courses/tech-resume/` |
+| `START_URLS` | Optional | Multi-line/space-separated extra start URLs |
 | `URL_PREFIX` | Recommended | `/courses/` |
 | `SEED_URLS` | For JS-nav sites | See [Seed URLs](#seed-urls--sites-with-no-a-href-chapter-links) |
 | `COOKIE` | If behind login | `session=eyJhb...; id=123` |
 | `HEADER_AUTHORIZATION` | If using Bearer token | `Bearer eyJhbGci...` |
 | `HEADER_*` | Optional | Any header: `HEADER_X_CUSTOM=value` |
 | `PLAYWRIGHT` | If SPA (Next.js/React) | `true` |
+| `PLAYWRIGHT_PAGE_FETCH` | Optional | `false` to use Playwright for discovery only and fetch page HTML via `requests` |
 | `PLAYWRIGHT_STORAGE_STATE` | Recommended fallback for hard auth | `./playwright_state.json` |
 | `WAIT_FOR` | For SPA content | `[class*="lesson"], article` |
 | `RENDER_SETTLE_MS` | For SPA auth/state hydration | `4000` |
+| `REMOVE_JS` | Optional | `false` to keep Next.js hydration for offline pages |
+| `STRIP_SELECTORS` | Optional | `[class*="unlockAllBtn"]` |
 | `AUTO_AUTH_HEADER_FROM_COOKIE` | For cookie-only auth setups | `true` |
+| `FOLLOW_LINKS` | Optional | `true` (set `false` for explicit URL-only mode) |
+| `AUTH_DEBUG` | Optional | `false` (set `true` for deep auth diagnostics) |
 | `MAX_PAGES` | Optional | Unset = unlimited download |
 | `THREADS` | Optional | Default `1` (safe for rate-limiting) |
 | `DESTINATION` | Optional | Defaults to hostname-based folder |
 | `DOWNLOAD_EXTERNAL_ASSETS` | Optional | `true` to localize CDN assets |
 | `EXTERNAL_DOMAINS` | Optional | `cdn.site.com fonts.googleapis.com` |
 | `USER_AGENT` | If using `cf_clearance` | Must match your browser's UA (see [cf_clearance and User-Agent](#cf_clearance-and-user-agent)) |
+| `DISCOVER_CHAPTERS` | For JS-nav course sites | `true` to auto-discover chapter URLs (requires `PLAYWRIGHT=true`) |
 
 **Defaults:**
 - `THREADS=1` (conservative, avoids rate limiting)
 - `MAX_PAGES=unlimited` (crawl until no new links found)
 - Everything else is empty unless set
+
+### Simple mode (recommended baseline)
+
+If your goal is "download exactly the URLs I provide with assets", use:
+
+```env
+FOLLOW_LINKS=false
+START_URLS="https://example.com/chapter-1
+https://example.com/chapter-2"
+```
+
+This avoids full-site crawling and keeps behavior predictable.
+
+### Recommended ByteByteGo mode
+
+```env
+PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=false
+DISCOVER_CHAPTERS=true
+REMOVE_JS=false
+STRIP_SELECTORS=[class*="unlockAllBtn"]
+```
+
+This uses Playwright for discovery, `requests` for final protected HTML, keeps Next.js hydration for offline pages, and hides paywall buttons after offline load.
 
 ---
 
@@ -283,6 +316,7 @@ to avoid common false auth failures from UA mismatch.
 | Some pages redirect, others work | Only some cookies copied | Use Option A to copy the full string |
 | `_debug_auth_fail.html` created | Auth check failed | Open the debug file in a browser to see what Playwright actually received |
 | Cookie/header setup still shows guest page | Site also depends on browser localStorage auth state | Use `PLAYWRIGHT_STORAGE_STATE` from a real logged-in browser session |
+| Playwright discovery works but saved chapters become login/guest pages | Client hydration downgraded auth after initial HTML load | Set `PLAYWRIGHT_PAGE_FETCH=false`, keep `REMOVE_JS=false`, and use `STRIP_SELECTORS` to hide overlay buttons offline |
 
 ---
 
@@ -408,6 +442,60 @@ uv run python web_downloader.py --url-prefix /courses/
 
 ---
 
+## Chapter auto-discovery
+
+### The problem
+
+ByteByteGo (and similar sites) require you to manually find and paste every chapter URL into `SEED_URLS` because their sidebar navigation uses JavaScript `onClick` handlers — no `<a href>` links. Doing this by hand for a 17-chapter course is tedious and error-prone.
+
+### The fix: `DISCOVER_CHAPTERS=true`
+
+Set this flag and the script discovers chapters automatically before crawling:
+
+```env
+URL=https://bytebytego.com/courses/tech-resume/
+DISCOVER_CHAPTERS=true
+PLAYWRIGHT=true        # required — discovery runs with a real browser
+```
+
+Run:
+
+```bash
+uv run python web_downloader.py
+```
+
+The script will:
+1. Load the course root URL in a headless Chromium browser
+2. Intercept all JSON API responses during page load
+3. Walk each response looking for paths that match the course URL pattern (e.g. `/courses/tech-resume/p1-c2-...`)
+4. Merge DOM links, sidebar `data-menu-id`, and `__NEXT_DATA__`
+5. Add all discovered chapter URLs to the crawl queue before the main crawl begins
+
+### What you'll see in trace.jsonl
+
+```
+chapter_discovery_start        — discovery phase begins
+chapter_discovery_api_hit      — a JSON API response contained chapter paths
+chapter_discovery_api_result   — N chapters found via API (best case)
+chapter_discovery_dom_result   — N chapters found via DOM links (fallback)
+chapter_discovery_next_data_result — N chapters found via __NEXT_DATA__ (last resort)
+chapter_discovery_complete     — final list of chapter URLs ready
+chapter_discovery_merged       — X new URLs added to crawl seed queue
+chapter_discovery_failed       — nothing found; fall back to manual SEED_URLS
+```
+
+### Combining with manual SEED_URLS
+
+Discovery and `SEED_URLS` are additive — discovered URLs are merged with any manually provided seeds (duplicates de-duped). This lets you hand-correct a partial discovery if needed.
+
+### Requirements
+
+- `PLAYWRIGHT=true` — discovery opens a real browser to capture API responses
+- Fresh auth cookies — the course root page may be behind a login wall
+- If discovery finds nothing, fall back to manual `SEED_URLS` (see below)
+
+---
+
 ## Seed URLs — sites with no `<a href>` chapter links
 
 ### The problem
@@ -529,12 +617,14 @@ URL=https://bytebytego.com/courses/tech-resume/
 URL_PREFIX=/courses/
 COOKIE=token=eyJ...; cf_clearance=abc...; csrf-token=xyz...
 PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=false
 WAIT_FOR=[class*="lesson"], article, main
-REMOVE_JS=true
+REMOVE_JS=false
+STRIP_SELECTORS=[class*="unlockAllBtn"]
 THREADS=1
 ```
 
-### SPA with no `<a>` chapter links (seed URLs required)
+### SPA with no `<a>` chapter links (manual explicit URL mode)
 
 **.env:**
 ```env
@@ -542,12 +632,12 @@ URL=https://bytebytego.com/courses/tech-resume/
 URL_PREFIX=/courses/
 COOKIE=token=eyJ...; cf_clearance=abc...; csrf-token=xyz...
 PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=false
 WAIT_FOR=[class*="lesson"], article, main
-SEED_URLS="https://bytebytego.com/courses/tech-resume/p0-acknowledgements
-https://bytebytego.com/courses/tech-resume/p0-c2-introduction
-https://bytebytego.com/courses/tech-resume/p1-c1-why-resumes-and-cvs-are-important
-https://bytebytego.com/courses/tech-resume/p1-c2-the-hiring-pipeline
-https://bytebytego.com/courses/tech-resume/p2-c3-tech-resume-basics"
+REMOVE_JS=false
+FOLLOW_LINKS=false
+START_URLS="https://bytebytego.com/courses/tech-resume/p0-c2-introduction
+https://bytebytego.com/courses/tech-resume/p1-c2-the-hiring-pipeline"
 THREADS=1
 ```
 
@@ -590,38 +680,23 @@ uv add playwright
 uv run playwright install chromium
 ```
 
-### Setup `.env` for ByteByteGo (complete example)
+### Setup `.env` for ByteByteGo (recommended working example)
 
 ```env
 # ── Step 1: URLs ──────────────────────────────────────────────────────────
 URL=https://bytebytego.com/courses/tech-resume/
 URL_PREFIX=/courses/
+DISCOVER_CHAPTERS=true
 
 # ── Step 2: Auth cookies (copy from F12 → Network → Cookie header) ────────
 COOKIE=token=eyJ...; cf_clearance=abc...; csrf-token=xyz...
 
-# ── Step 3: Chapter URLs (sidebar uses onClick, not <a href>) ─────────────
-SEED_URLS="https://bytebytego.com/courses/tech-resume/p0-acknowledgements
-https://bytebytego.com/courses/tech-resume/p0-c2-introduction
-https://bytebytego.com/courses/tech-resume/p1-c1-why-resumes-and-cvs-are-important
-https://bytebytego.com/courses/tech-resume/p1-c2-the-hiring-pipeline
-https://bytebytego.com/courses/tech-resume/p2-c3-tech-resume-basics
-https://bytebytego.com/courses/tech-resume/p2-c4-resume-structure
-https://bytebytego.com/courses/tech-resume/p2-c5-standing-out
-https://bytebytego.com/courses/tech-resume/p2-c6-common-mistakes
-https://bytebytego.com/courses/tech-resume/p2-c7-different-experience-levels-different-career-paths
-https://bytebytego.com/courses/tech-resume/p2-c8-exercises-to-polish-your-resume
-https://bytebytego.com/courses/tech-resume/p2-c9-beyond-the-resume
-https://bytebytego.com/courses/tech-resume/p3-c10-good-resume-template-principles
-https://bytebytego.com/courses/tech-resume/p3-c11-resume-templates
-https://bytebytego.com/courses/tech-resume/p3-c12-resume-improvement-examples
-https://bytebytego.com/courses/tech-resume/p3-c13-advice-for-hiring-managers-on-running-a-good-screening-process
-https://bytebytego.com/courses/tech-resume/p3-conclusion"
-
-# ── Step 4: Rendering options ─────────────────────────────────────────────
+# ── Step 3: Rendering / capture strategy ──────────────────────────────────
 PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=false
 WAIT_FOR=[class*="lesson"], article, main
-REMOVE_JS=true
+REMOVE_JS=false
+STRIP_SELECTORS=[class*="unlockAllBtn"]
 THREADS=1
 ```
 
@@ -646,6 +721,17 @@ Default is `body` (always present but may be too early for SPAs).
 `RENDER_SETTLE_MS` adds a fixed delay after `WAIT_FOR` before HTML extraction.
 For auth-heavy SPAs, this helps avoid capturing a transient guest-state DOM.
 
+### Why `PLAYWRIGHT_PAGE_FETCH=false` is recommended for ByteByteGo
+
+This is the final stable mode:
+
+- Playwright discovers chapters.
+- Final protected chapter HTML is fetched via the authenticated `requests` session.
+- Saved HTML keeps JS for offline hydration.
+- Runtime fixes handle paywall-button hiding, Next.js image path rewriting, and lazy image loading on `file://`.
+
+This mode was verified working end to end.
+
 ---
 
 ## All CLI flags
@@ -655,6 +741,7 @@ All of these can be set in `.env` file (recommended) or via CLI (for quick overr
 | CLI Flag | `.env` Variable | Default | Description |
 |---|---|---|---|
 | `--url` | `URL` | *(required)* | Starting URL to crawl |
+| `--start-url` | `START_URLS` | *(none)* | Additional starting URL(s) to process (repeatable) |
 | `--url-prefix` | `URL_PREFIX` | *(none)* | Only crawl pages whose path starts with this prefix |
 | `--seed-url` | `SEED_URLS` | *(none)* | Extra URL(s) to pre-queue (repeatable via CLI) |
 | `--destination` | `DESTINATION` | Derived from URL | Output folder |
@@ -667,6 +754,9 @@ All of these can be set in `.env` file (recommended) or via CLI (for quick overr
 | `--wait-for` | `WAIT_FOR` | `body` | CSS selector Playwright waits for |
 | `--render-settle-ms` | `RENDER_SETTLE_MS` | `4000` | Extra wait after `WAIT_FOR` before snapshot |
 | `--auto-auth-header-from-cookie` | `AUTO_AUTH_HEADER_FROM_COOKIE` | on | Auto-add `Authorization: Bearer <token-cookie>` when missing |
+| `--follow-links` | `FOLLOW_LINKS` | on | Follow discovered page links (`false` = explicit URL-only mode) |
+| `--auth-debug` | `AUTH_DEBUG` | off | Emit detailed Playwright auth/network diagnostics |
+| `--discover-chapters` | `DISCOVER_CHAPTERS` | off | Auto-discover chapter URLs from course root before crawling (requires Playwright) |
 | `--download-external-assets` | `DOWNLOAD_EXTERNAL_ASSETS` | off | Download and localize CDN/external assets |
 | `--external-domains` | `EXTERNAL_DOMAINS` | — | Space-separated whitelist of CDN domains |
 
@@ -700,10 +790,11 @@ you can open `index.html` directly in a browser with no server.
 | Limitation | Workaround |
 |---|---|
 | `requests` mode cannot execute JavaScript | Use `PLAYWRIGHT=true` |
-| Sites where chapter links use `onClick` (not `<a href>`) | Use `SEED_URLS` to list all chapter URLs explicitly |
-| `__NEXT_DATA__` only contains the current page's route on some sites | Use `SEED_URLS` — `__NEXT_DATA__` discovery is a best-effort supplement |
+| Sites where chapter links use `onClick` (not `<a href>`) | Use `DISCOVER_CHAPTERS=true`; fall back to `SEED_URLS` or `START_URLS` only if needed |
+| `__NEXT_DATA__` only contains a partial chapter list on some sites | Discovery now merges API + DOM + sidebar `data-menu-id` + `__NEXT_DATA__`; use manual seeds only as fallback |
 | Crawl may follow unrelated nav links (pricing, about, etc.) | Set `URL_PREFIX=/courses/` to restrict to the relevant path |
 | `--max-pages` caps the crawl | Increase it (`MAX_PAGES=1000`) |
 | ByteByteGo may rate-limit or block headless browsers | Keep `THREADS=1`; re-run after a delay (existing files are skipped) |
 | Session cookies expire | Re-copy fresh cookies from DevTools and re-run (`cf_clearance` expires in ~30 min) |
 | 404 assets (broken site references) | Logged as `WARN` (`asset_not_found`) — safe to ignore |
+| Offline images still break on `file://` for Next.js pages | Keep `REMOVE_JS=false` and use the current runtime asset-fix injection logic in `web_downloader.py` |
