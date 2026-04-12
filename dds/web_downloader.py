@@ -3015,6 +3015,62 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def log_site_mode_hints(
+    start_url: str,
+    url_prefix: Optional[str],
+    follow_links: bool,
+    discover_chapters: bool,
+) -> None:
+    """
+    Emit targeted config hints for known site structures.
+
+    ByteByteGo guides are flat URLs under ``/guides/``:
+      - category: /guides/ai-machine-learning/
+      - article:  /guides/what-is-an-ai-agent/
+
+    Articles are *not* nested below the category path, so the crawler must stay
+    on the broader ``/guides/`` prefix and keep ``FOLLOW_LINKS=true``.
+    """
+    parsed = urlparse(start_url)
+    path = parsed.path.rstrip("/") or "/"
+    normalized_prefix = (
+        "/" + url_prefix.strip().strip("/")
+        if url_prefix and url_prefix.strip()
+        else None
+    )
+
+    if path == "/guides" or path.startswith("/guides/"):
+        _log(
+            "guides_mode_detected",
+            url=start_url,
+            url_prefix=normalized_prefix or "",
+            follow_links=follow_links,
+            discover_chapters=discover_chapters,
+        )
+        if discover_chapters:
+            _log(
+                "config_warn",
+                setting="DISCOVER_CHAPTERS",
+                url=start_url,
+                hint="Guides pages already expose normal links. Set DISCOVER_CHAPTERS=false.",
+            )
+        if not follow_links:
+            _log(
+                "config_warn",
+                setting="FOLLOW_LINKS",
+                url=start_url,
+                hint="Guides crawling needs FOLLOW_LINKS=true so category pages can enqueue article pages.",
+            )
+        if normalized_prefix and not normalized_prefix.startswith("/guides"):
+            _log(
+                "config_warn",
+                setting="URL_PREFIX",
+                value=normalized_prefix,
+                url=start_url,
+                hint="Guides article URLs are flat under /guides/. Use URL_PREFIX=/guides/ or leave it unset.",
+            )
+
+
 if __name__ == "__main__":
     # Basic argument validation
     args = parse_args()
@@ -3110,6 +3166,12 @@ if __name__ == "__main__":
         sys.exit(2)
 
     host = start_urls[0]
+    log_site_mode_hints(
+        start_url=host,
+        url_prefix=args.url_prefix,
+        follow_links=bool(args.follow_links),
+        discover_chapters=bool(args.discover_chapters),
+    )
     extra_start_urls = start_urls[1:]
     merged_seed_urls = extra_start_urls + (args.seed_urls or [])
     root = make_root(host, args.destination)

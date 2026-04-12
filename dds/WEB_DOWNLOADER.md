@@ -599,6 +599,45 @@ uv run python web_downloader.py
 URL=https://example.com/
 ```
 
+### ByteByteGo guides section
+
+**.env:**
+```env
+URL=https://bytebytego.com/guides/
+URL_PREFIX=/guides/
+FOLLOW_LINKS=true
+DISCOVER_CHAPTERS=false
+PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=false
+REMOVE_JS=false
+THREADS=1
+```
+
+Use this mode for articles and tutorials under `/guides/`, for example:
+
+- `https://bytebytego.com/guides/abc`
+- `https://bytebytego.com/guides/daq`
+
+Important:
+
+- Guide category pages and guide article pages are both flat under `/guides/`.
+- A category like `/guides/ai-machine-learning/` links to articles such as
+  `/guides/what-is-an-ai-agent/`.
+- The article URL is **not** `/guides/ai-machine-learning/what-is-an-ai-agent/`.
+- Keep `URL_PREFIX=/guides/` and `FOLLOW_LINKS=true` so the crawler can move
+  from categories to the real article pages.
+
+Saved output goes under:
+
+```text
+bytebytego_com/
+└── guides/
+    ├── index.html
+    ├── abc.html
+    ├── daq.html
+    └── ...
+```
+
 ### Authenticated server-rendered site
 
 **.env:**
@@ -609,12 +648,13 @@ MAX_PAGES=200
 THREADS=2
 ```
 
-### SPA with JavaScript rendering (Next.js / React)
+### ByteByteGo course root with auto-discovery
 
 **.env:**
 ```env
 URL=https://bytebytego.com/courses/tech-resume/
 URL_PREFIX=/courses/
+DISCOVER_CHAPTERS=true
 COOKIE=token=eyJ...; cf_clearance=abc...; csrf-token=xyz...
 PLAYWRIGHT=true
 PLAYWRIGHT_PAGE_FETCH=false
@@ -623,6 +663,9 @@ REMOVE_JS=false
 STRIP_SELECTORS=[class*="unlockAllBtn"]
 THREADS=1
 ```
+
+Use this mode when you start from a course root page and want the downloader to
+discover all lesson URLs automatically.
 
 ### SPA with no `<a>` chapter links (manual explicit URL mode)
 

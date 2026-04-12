@@ -21,6 +21,43 @@ This session reached a working solution for both the downloader strategy and the
 
 ---
 
+## 2b. ByteByteGo Guides Mode
+
+The downloader also supports the public ByteByteGo guides site under
+`https://bytebytego.com/guides/`, but the URL structure is easy to misread.
+
+Important behavior:
+
+- Guide categories and guide articles are both first-level pages under `/guides/`.
+- Example category:
+  - `/guides/ai-machine-learning/`
+- Example article inside that category:
+  - `/guides/what-is-an-ai-agent/`
+- The article URL is **not** nested like:
+  - `/guides/ai-machine-learning/what-is-an-ai-agent/`
+
+What this means for config:
+
+- Use `URL_PREFIX=/guides/`
+- Use `FOLLOW_LINKS=true`
+- Use `DISCOVER_CHAPTERS=false`
+
+Reason:
+
+- Unlike protected course sidebars, guides pages already expose normal
+  `<a href>` links.
+- The crawler can reach article pages by following links from the guides
+  landing page and category pages.
+- The old course-specific discovery logic is unnecessary for guides.
+
+Guardrail added in code:
+
+- `web_downloader.py` now logs targeted config warnings when the start URL is
+  under `/guides/` but the config still looks like course mode
+  (`DISCOVER_CHAPTERS=true`, `FOLLOW_LINKS=false`, or `URL_PREFIX=/courses/`).
+
+---
+
 ## 3. Final Working Strategy
 
 ### What did not work reliably
