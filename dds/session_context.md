@@ -106,6 +106,29 @@ Important:
 
 - Discovery must merge all sources.
 - It must not trust the first non-empty source.
+- Discovery must support **multi-level lesson hierarchies**, not just
+  `course/chapter`.
+
+### Hierarchy update
+
+ByteByteGo now also exposes deeper lesson URLs such as:
+
+- `/courses/coding-patterns/two-pointers/`
+- `/courses/coding-patterns/two-pointers/next-lexicographical-sequence`
+
+The original extractor mostly relied on already-built root-relative strings.
+That was too narrow for newer payloads where routes are represented as
+structured objects like:
+
+```json
+{"course":"coding-patterns","slug":["two-pointers","next-lexicographical-sequence"]}
+```
+
+The downloader was updated to reconstruct URLs from `course + slug[]`,
+`rootPath + slug[]`, and `query.course + query.slug[]` shapes inside JSON.
+
+This makes chapter discovery and `__NEXT_DATA__` mining robust for arbitrary
+depth under a course path.
 
 This is now implemented and working.
 
@@ -158,6 +181,7 @@ This solved the last offline image issue.
   - `FOLLOW_LINKS=false`
 - Added `DISCOVER_CHAPTERS`
 - Added `PLAYWRIGHT_PAGE_FETCH`
+- Added structured JSON route extraction for deeper hierarchy URLs
 - Added runtime hide CSS injection for paywall buttons
 - Added runtime offline asset fixup injection
 - Added structured `__NEXT_DATA__` asset rewriting
@@ -255,7 +279,7 @@ Recommended next-step areas:
 1. cleanup/refactor `web_downloader.py`
 2. improve docs/examples further
 3. optional safer handling of stale `cf_clearance`
-4. optional broader testing on other courses/sites
+4. broader testing on more nested course hierarchies and other sites
 
 ---
 
@@ -267,6 +291,7 @@ ByteByteGo now works with this model:
 - `requests` for final protected page HTML
 - keep JS in offline HTML
 - hide paywall overlay selectors
+- rebuild nested course URLs from structured JSON route objects
 - rewrite runtime asset paths
 - rewrite `__NEXT_DATA__` image paths
 - force eager offline image loading

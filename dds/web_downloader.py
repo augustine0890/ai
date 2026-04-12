@@ -1904,6 +1904,123 @@ def extract_css_assets(css_text: str) -> list[str]:
     return results
 
 
+def _slug_parts(value: object) -> list[str]:
+    """
+    Normalize a slug value into clean path segments.
+
+    Supports:
+    - "two-pointers"
+    - "two-pointers/next-lexicographical-sequence"
+    - ["two-pointers", "next-lexicographical-sequence"]
+    """
+    parts: list[str] = []
+
+    def _append_one(raw: object) -> None:
+        if not isinstance(raw, str):
+            return
+        text = raw.strip().strip("/")
+        if not text:
+            return
+        for piece in text.split("/"):
+            piece = piece.strip()
+            if not piece or "[" in piece or "]" in piece:
+                continue
+            parts.append(piece)
+
+    if isinstance(value, str):
+        _append_one(value)
+    elif isinstance(value, list):
+        for item in value:
+            _append_one(item)
+
+    return parts
+
+
+def _extract_root_relative_paths_from_json(
+    node: object,
+    *,
+    course_path: Optional[str] = None,
+) -> list[str]:
+    """
+    Extract candidate internal page paths from a JSON tree.
+
+    This handles both:
+    - direct root-relative strings like "/courses/x/y"
+    - structured Next.js route objects like:
+      {"course": "coding-patterns", "slug": ["two-pointers", "next-lexicographical-sequence"]}
+
+    The structured form matters for deeper hierarchies because some APIs expose
+    path segments as arrays instead of already-joined URLs.
+    """
+    results: list[str] = []
+    seen: set[str] = set()
+
+    def _add_path(raw: object) -> None:
+        if not isinstance(raw, str):
+            return
+        path = raw.strip()
+        if not path.startswith("/"):
+            return
+        if "[" in path or "]" in path:
+            return
+        if "\\" in path:
+            return
+        if len(path) > 500:
+            return
+        if path.startswith(("/_next", "/__nextjs", "/_error", "/api/")):
+            return
+        if Path(path.split("?")[0]).suffix.lower() in ASSET_EXTENSIONS:
+            return
+        if path not in seen:
+            seen.add(path)
+            results.append(path)
+
+    def _recurse(current: object) -> None:
+        if isinstance(current, str):
+            _add_path(current)
+            return
+
+        if isinstance(current, list):
+            for item in current:
+                _recurse(item)
+            return
+
+        if not isinstance(current, dict):
+            return
+
+        root_path = current.get("rootPath") or current.get("root_path")
+        course = current.get("course")
+        slug_parts = _slug_parts(current.get("slug"))
+        query = current.get("query")
+        default_chapter = current.get("defaultChapter") or current.get("default_chapter")
+
+        if isinstance(default_chapter, str):
+            _add_path(default_chapter)
+
+        if isinstance(root_path, str) and root_path.startswith("/") and slug_parts:
+            _add_path(root_path.rstrip("/") + "/" + "/".join(slug_parts))
+
+        if isinstance(course, str) and slug_parts:
+            _add_path(f"/courses/{course.strip('/')}/" + "/".join(slug_parts))
+
+        if course_path and slug_parts:
+            _add_path(course_path.rstrip("/") + "/" + "/".join(slug_parts))
+
+        if isinstance(query, dict):
+            query_course = query.get("course")
+            query_slug_parts = _slug_parts(query.get("slug"))
+            if isinstance(query_course, str) and query_slug_parts:
+                _add_path(f"/courses/{query_course.strip('/')}/" + "/".join(query_slug_parts))
+            elif course_path and query_slug_parts:
+                _add_path(course_path.rstrip("/") + "/" + "/".join(query_slug_parts))
+
+        for value in current.values():
+            _recurse(value)
+
+    _recurse(node)
+    return results
+
+
 def _extract_next_data_urls(
     soup: BeautifulSoup,
     base_url: str,
@@ -1942,48 +2059,15 @@ def _extract_next_data_urls(
     except Exception:  # noqa: BLE001
         return []
 
-    # Walk the parsed JSON tree recursively — only genuine string leaf values.
-    # Avoids re-serialisation artifacts (double-escaped backslashes, etc.).
-    collected: list[str] = []
-
-    def _walk(node: object) -> None:
-        if isinstance(node, str):
-            collected.append(node)
-        elif isinstance(node, dict):
-            for v in node.values():
-                _walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    _walk(data)
-
     parsed_base = urlparse(base_url)
     base_scheme_host = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    course_path = parsed_base.path.rstrip("/") or None
+    collected = _extract_root_relative_paths_from_json(data, course_path=course_path)
 
     seen: set[str] = set()
     results: list[str] = []
 
     for raw in collected:
-        # Must look like a root-relative path
-        if not raw.startswith("/"):
-            continue
-        # Reject Next.js route template placeholders: /courses/[course]/[...slug]
-        if "[" in raw or "]" in raw:
-            continue
-        # Reject backslash-escaped strings (JSON escape artifacts)
-        if "\\" in raw:
-            continue
-        # Reject unreasonably long strings
-        if len(raw) > 300:
-            continue
-        # Reject asset file extensions
-        if Path(raw.split("?")[0]).suffix.lower() in ASSET_EXTENSIONS:
-            continue
-        # Reject Next.js internals and API routes
-        if raw.startswith(("/_next", "/__nextjs", "/_error", "/api/")):
-            continue
-
         abs_url = normalize_url(canonicalize_url(f"{base_scheme_host}{raw}", base_url))
         p = urlparse(abs_url)
 
@@ -2067,26 +2151,6 @@ def _discover_course_chapters(
     api_found_paths: list[str] = []
     api_seen: set[str] = set()
 
-    def _walk_json(node: object) -> None:
-        if isinstance(node, str):
-            stripped = node.strip()
-            if (
-                stripped.startswith(chapter_prefix)
-                and len(stripped) > len(chapter_prefix)
-                and "[" not in stripped
-                and "\\" not in stripped
-                and len(stripped) < 300
-            ):
-                if stripped not in api_seen:
-                    api_seen.add(stripped)
-                    api_found_paths.append(stripped)
-        elif isinstance(node, dict):
-            for v in node.values():
-                _walk_json(v)
-        elif isinstance(node, list):
-            for item in node:
-                _walk_json(item)
-
     page = pw_context.new_page()
     try:
         def on_response(resp) -> None:  # noqa: ANN001
@@ -2096,7 +2160,17 @@ def _discover_course_chapters(
                     return
                 data = resp.json()
                 before = len(api_found_paths)
-                _walk_json(data)
+                for candidate in _extract_root_relative_paths_from_json(
+                    data,
+                    course_path=course_path,
+                ):
+                    if (
+                        candidate.startswith(chapter_prefix)
+                        and len(candidate) > len(chapter_prefix)
+                        and candidate not in api_seen
+                    ):
+                        api_seen.add(candidate)
+                        api_found_paths.append(candidate)
                 after = len(api_found_paths)
                 if after > before:
                     _log(
