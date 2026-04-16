@@ -485,10 +485,157 @@ def parse_cookie_header(cookie_header: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def _parse_json_list(raw: str) -> Optional[list[str]]:
+    """
+    Parse a JSON array string into a cleaned list of strings.
+
+    Returns None when the input is not valid JSON list syntax so callers can
+    fall back to simpler separators.
+    """
+    text = raw.strip()
+    if not text.startswith("["):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def parse_env_token_list(raw: str) -> list[str]:
+    """
+    Parse .env list values that may be written as JSON, comma-separated,
+    newline-separated, or whitespace-separated tokens.
+
+    Intended for URL/domain lists such as START_URLS, SEED_URLS, and
+    EXTERNAL_DOMAINS.
+    """
+    text = raw.strip()
+    if not text:
+        return []
+
+    json_items = _parse_json_list(text)
+    if json_items is not None:
+        return json_items
+
+    items: list[str] = []
+    for line in text.replace("\r", "\n").splitlines():
+        chunk = line.strip()
+        if not chunk:
+            continue
+        if "," in chunk:
+            items.extend(part.strip() for part in chunk.split(",") if part.strip())
+        else:
+            items.extend(part.strip() for part in chunk.split() if part.strip())
+    return items
+
+
+def parse_env_csv_list(raw: str) -> list[str]:
+    """
+    Parse .env list values that should only split on commas, with optional
+    JSON array support.
+
+    Intended for selectors and similar values that may contain spaces.
+    """
+    text = raw.strip()
+    if not text:
+        return []
+
+    json_items = _parse_json_list(text)
+    if json_items is not None:
+        return json_items
+
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
 def _sample(values: list[str], limit: int = 8) -> list[str]:
     """Return a short stable sample for debug logs."""
     out = sorted(set(v for v in values if v))
     return out[:limit]
+
+
+def _domain_matches(candidate: str, hosts: set[str]) -> bool:
+    """True when a cookie domain belongs to one of the first-party hosts."""
+    candidate = candidate.lstrip(".").lower()
+    if not candidate:
+        return False
+    return any(
+        candidate == host or candidate.endswith("." + host) or host.endswith("." + candidate)
+        for host in hosts
+    )
+
+
+def load_storage_state_into_session(
+    storage_state_path: Path,
+    first_party_hosts: set[str],
+) -> None:
+    """
+    Import first-party Playwright storage_state cookies into requests.Session.
+
+    This lets asset downloads reuse the same authenticated browser cookies when
+    the user relies on PLAYWRIGHT_STORAGE_STATE instead of manual COOKIE=.
+    """
+    try:
+        state = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        _log(
+            "storage_state_session_cookie_load_failed",
+            path=str(storage_state_path),
+            error=str(exc),
+        )
+        return
+    except json.JSONDecodeError as exc:
+        _log(
+            "storage_state_session_cookie_parse_failed",
+            path=str(storage_state_path),
+            error=str(exc),
+        )
+        return
+
+    raw_cookies = state.get("cookies")
+    if not isinstance(raw_cookies, list):
+        _log(
+            "storage_state_session_cookie_missing",
+            path=str(storage_state_path),
+            hint="storage_state JSON does not contain a cookies list",
+        )
+        return
+
+    imported_names: list[str] = []
+    for cookie in raw_cookies:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name", "")).strip()
+        value = str(cookie.get("value", "")).strip()
+        domain = str(cookie.get("domain", "")).strip()
+        path = str(cookie.get("path", "/")).strip() or "/"
+        if not name or not value:
+            continue
+        if domain and first_party_hosts and not _domain_matches(domain, first_party_hosts):
+            continue
+
+        kwargs = {"path": path}
+        if domain:
+            kwargs["domain"] = domain
+        SESSION.cookies.set(name, value, **kwargs)
+        imported_names.append(name)
+
+    if imported_names:
+        _log(
+            "storage_state_session_cookies_injected",
+            path=str(storage_state_path),
+            count=len(imported_names),
+            names=sorted(set(imported_names)),
+        )
+    else:
+        _log(
+            "storage_state_session_cookies_empty",
+            path=str(storage_state_path),
+            hosts=sorted(first_party_hosts),
+            hint="No first-party cookies were imported into the requests session",
+        )
 
 
 def _cookie_meta_for_debug(
@@ -1575,7 +1722,7 @@ def rewrite_links(
         base_tag.decompose()
 
     # Common attributes that contain URL-like values.
-    url_attrs = {"src", "href", "data-src", "poster"}
+    url_attrs = {"src", "href", "data-src", "poster", "xlink:href"}
 
     def strip_sri_and_cors(tag) -> None:
         for attr in ("integrity", "crossorigin"):
@@ -2661,7 +2808,7 @@ def crawl_site(
 
         local_path = to_local_path(urlparse(page_url), root)
         create_dir(local_path.parent)
-        if inject_runtime_asset_fixups(soup, root, local_path.parent):
+        if not remove_js and inject_runtime_asset_fixups(soup, root, local_path.parent):
             _log("runtime_asset_fixups_injected", url=page_url)
         rewrite_links(
             soup,
@@ -2701,7 +2848,10 @@ def make_root(url: str, custom: Optional[str]) -> Path:
     Example:
       https://example.com -> example_com
     """
-    return Path(custom) if custom else Path(urlparse(url).netloc.replace(".", "_"))
+    if custom:
+        expanded = os.path.expandvars(os.path.expanduser(custom))
+        return Path(expanded)
+    return Path(urlparse(url).netloc.replace(".", "_"))
 
 
 # ---------------------------------------------------------------------------
@@ -2723,7 +2873,7 @@ def parse_args() -> argparse.Namespace:
 
     .env variables:
       URL                       Starting URL to crawl
-      START_URLS                Extra starting URL(s), space/newline separated
+      START_URLS                Extra starting URL(s), JSON/comma/newline/space separated
       COOKIE                    Full Cookie header string from browser DevTools
       HEADER_<NAME>             One header per var, e.g. HEADER_AUTHORIZATION=Bearer eyJ...
       PLAYWRIGHT                true/1/yes to enable headless Chromium rendering
@@ -2735,7 +2885,7 @@ def parse_args() -> argparse.Namespace:
       THREADS                   Concurrent workers (default 1)
       DESTINATION               Output folder
       DOWNLOAD_EXTERNAL_ASSETS  true/1/yes to download CDN assets
-      EXTERNAL_DOMAINS          Space-separated list of allowed CDN domains
+      EXTERNAL_DOMAINS          JSON/comma/newline/space-separated CDN domains
       USER_AGENT                Browser UA string (recommended with cf_clearance)
       FOLLOW_LINKS              true/false to discover extra pages from links
       AUTH_DEBUG                true/false for detailed auth/network diagnostics
@@ -2746,7 +2896,7 @@ def parse_args() -> argparse.Namespace:
     # ── Read env vars ────────────────────────────────────────────────────────
     env_url = os.getenv("URL", "")
     _start_raw = os.getenv("START_URLS", "")
-    env_start_urls: list[str] = [u.strip() for u in _start_raw.replace("\n", " ").split() if u.strip()]
+    env_start_urls = parse_env_token_list(_start_raw)
     env_cookie = os.getenv("COOKIE")
     env_playwright = os.getenv("PLAYWRIGHT", "").lower() in ("1", "true", "yes")
     _page_fetch_raw = os.getenv("PLAYWRIGHT_PAGE_FETCH", "")
@@ -2763,7 +2913,7 @@ def parse_args() -> argparse.Namespace:
     env_follow_links = os.getenv("FOLLOW_LINKS", "true").lower() in ("1", "true", "yes")
     env_auth_debug = os.getenv("AUTH_DEBUG", "false").lower() in ("1", "true", "yes")
     _strip_raw = os.getenv("STRIP_SELECTORS", "")
-    env_strip_selectors: list[str] = [s.strip() for s in _strip_raw.split(",") if s.strip()]
+    env_strip_selectors = parse_env_csv_list(_strip_raw)
     env_destination = os.getenv("DESTINATION") or None
     env_discover_chapters = os.getenv("DISCOVER_CHAPTERS", "false").lower() in ("1", "true", "yes")
 
@@ -2775,14 +2925,14 @@ def parse_args() -> argparse.Namespace:
 
     env_download_external = os.getenv("DOWNLOAD_EXTERNAL_ASSETS", "").lower() in ("1", "true", "yes")
 
-    _ext = os.getenv("EXTERNAL_DOMAINS", "").split()
+    _ext = parse_env_token_list(os.getenv("EXTERNAL_DOMAINS", ""))
     env_external_domains = _ext if _ext else None
 
     env_url_prefix = os.getenv("URL_PREFIX") or None
 
-    # SEED_URLS: newline- or space-separated list of extra starting URLs.
+    # SEED_URLS: JSON, comma, newline, or space-separated list of extra URLs.
     _seed_raw = os.getenv("SEED_URLS", "")
-    env_seed_urls: list[str] = [u.strip() for u in _seed_raw.replace("\n", " ").split() if u.strip()]
+    env_seed_urls = parse_env_token_list(_seed_raw)
 
     env_remove_js = str(os.getenv("REMOVE_JS", "")).strip().lower() == "true"
     env_auth_fail_text = os.getenv("AUTH_FAIL_TEXT") or None
@@ -2817,7 +2967,8 @@ def parse_args() -> argparse.Namespace:
         metavar="URL",
         help=(
             "Additional starting URL(s) to process (repeatable). "
-            "Useful for chapter-only downloads. Can be set via START_URLS= in .env."
+            "Useful for chapter-only downloads. Can be set via START_URLS= in .env "
+            "(JSON array, comma, newline, or space-separated)."
         ),
     )
     p.add_argument(
@@ -2943,7 +3094,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Extra URL(s) to add to the crawl queue before starting (repeatable). "
             "Use when the site does not expose all chapter links as <a> tags. "
-            "Can be set via SEED_URLS= (space/newline-separated) in .env."
+            "Can be set via SEED_URLS= (JSON array, comma, newline, or "
+            "space-separated) in .env."
         ),
     )
     p.add_argument(
@@ -3032,6 +3184,7 @@ def log_site_mode_hints(
     on the broader ``/guides/`` prefix and keep ``FOLLOW_LINKS=true``.
     """
     parsed = urlparse(start_url)
+    host = (parsed.hostname or "").lower()
     path = parsed.path.rstrip("/") or "/"
     normalized_prefix = (
         "/" + url_prefix.strip().strip("/")
@@ -3069,6 +3222,30 @@ def log_site_mode_hints(
                 url=start_url,
                 hint="Guides article URLs are flat under /guides/. Use URL_PREFIX=/guides/ or leave it unset.",
             )
+    elif host == "learn.wqu.edu":
+        _log(
+            "site_mode_detected",
+            site="learn.wqu.edu",
+            url=start_url,
+            follow_links=follow_links,
+            discover_chapters=discover_chapters,
+        )
+        if follow_links:
+            _log(
+                "config_hint",
+                setting="FOLLOW_LINKS",
+                url=start_url,
+                hint="WQU lesson downloads are usually more predictable with FOLLOW_LINKS=false and explicit START_URLS.",
+            )
+        _log(
+            "config_hint",
+            setting="PLAYWRIGHT_STORAGE_STATE",
+            url=start_url,
+            hint=(
+                "For WQU, prefer PLAYWRIGHT_STORAGE_STATE from a real logged-in browser "
+                "session instead of manually reconstructing cookies from the Application tab."
+            ),
+        )
 
 
 if __name__ == "__main__":
@@ -3175,6 +3352,29 @@ if __name__ == "__main__":
     extra_start_urls = start_urls[1:]
     merged_seed_urls = extra_start_urls + (args.seed_urls or [])
     root = make_root(host, args.destination)
+    first_party_hosts = {
+        h.lower()
+        for h in ((urlparse(u).hostname or "") for u in start_urls)
+        if h
+    }
+
+    primary_host = (urlparse(host).hostname or "").lower()
+    if primary_host == "learn.wqu.edu" and not args.remove_js:
+        args.remove_js = True
+        _log(
+            "site_mode_adjustment",
+            site="learn.wqu.edu",
+            setting="REMOVE_JS",
+            value=True,
+            url=host,
+            hint=(
+                "WQU lesson pages already contain rendered HTML. Keeping site JS in "
+                "offline mode causes the client app to blank the content on file://."
+            ),
+        )
+
+    if args.playwright_storage_state:
+        load_storage_state_into_session(Path(args.playwright_storage_state), first_party_hosts)
 
     external_domains = (
         {
@@ -3247,20 +3447,14 @@ if __name__ == "__main__":
 
         # Scope Authorization to first-party hosts only. Sending bearer tokens
         # to third-party scripts/styles causes CORS failures and token leakage.
-        first_party_hosts = sorted(
-            {
-                h.lower()
-                for h in ((urlparse(u).hostname or "") for u in start_urls)
-                if h
-            }
-        )
-        if pw_auth_value and first_party_hosts:
+        scoped_hosts = sorted(first_party_hosts)
+        if pw_auth_value and scoped_hosts:
 
             def route_with_scoped_auth(route, request) -> None:  # noqa: ANN001
                 req_host = (urlparse(request.url).hostname or "").lower()
                 same_party = any(
                     req_host == host or req_host.endswith("." + host)
-                    for host in first_party_hosts
+                    for host in scoped_hosts
                 )
                 if same_party:
                     headers = dict(request.headers)
@@ -3270,7 +3464,7 @@ if __name__ == "__main__":
                     route.continue_()
 
             pw_context.route("**/*", route_with_scoped_auth)
-            _log("playwright_auth_header_scoped", hosts=first_party_hosts)
+            _log("playwright_auth_header_scoped", hosts=scoped_hosts)
 
         if pw_cookies:
             pw_context.add_cookies(pw_cookies)

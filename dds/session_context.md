@@ -1,4 +1,4 @@
-# Session Context: ByteByteGo Downloader Final Working State
+# Session Context: ByteByteGo + WQU Downloader Working State
 
 ## 1. Goal
 
@@ -6,6 +6,7 @@ Build a downloader that can:
 
 1. Download one protected ByteByteGo chapter and its assets so it opens offline.
 2. Later download a full course from the course root URL by auto-discovering chapters.
+3. Download exact `learn.wqu.edu` lesson URLs so they open offline.
 
 This session reached a working solution for both the downloader strategy and the offline rendering issues.
 
@@ -55,6 +56,48 @@ Guardrail added in code:
 - `web_downloader.py` now logs targeted config warnings when the start URL is
   under `/guides/` but the config still looks like course mode
   (`DISCOVER_CHAPTERS=true`, `FOLLOW_LINKS=false`, or `URL_PREFIX=/courses/`).
+
+---
+
+## 2c. WQU Exact-URL Mode
+
+The downloader now also supports `https://learn.wqu.edu/...` lesson pages, but
+the working offline strategy is different from ByteByteGo.
+
+Important behavior:
+
+- WQU lesson pages can be captured successfully with Playwright using a real
+  `PLAYWRIGHT_STORAGE_STATE` file from a logged-in browser session.
+- The saved HTML source already contains the lesson body.
+- But if site JavaScript is kept, the offline `file://` page reboots the app,
+  fails to load JS/CSS chunks correctly, and the visible content collapses to a
+  cookie-banner/minimal shell state.
+
+What this means for config:
+
+- Use exact URL mode:
+  - `FOLLOW_LINKS=false`
+  - `START_URLS=[...]`
+- Use browser state auth:
+  - `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json`
+- Use Playwright for final page capture:
+  - `PLAYWRIGHT=true`
+  - `PLAYWRIGHT_PAGE_FETCH=true`
+- Remove JavaScript in the saved offline page:
+  - `REMOVE_JS=true`
+
+Reason:
+
+- For WQU, the rendered HTML is already sufficient for offline reading.
+- Unlike ByteByteGo, WQU does not need client hydration offline.
+- Keeping app JS is harmful on `file://`.
+
+Extra implementation detail:
+
+- `web_downloader.py` now auto-enables `REMOVE_JS=true` for `learn.wqu.edu`
+  when the user forgets to set it.
+- The downloader also rewrites `xlink:href` so SVG sprite references become
+  local relative paths.
 
 ---
 
@@ -117,6 +160,15 @@ The authenticated `requests` path was the stable one for protected chapter HTML.
 2. If `cf_clearance` is included, `USER_AGENT` must match the browser.
 3. Keep `AUTO_AUTH_HEADER_FROM_COOKIE=true`.
 4. Use `PLAYWRIGHT_STORAGE_STATE` only as a fallback if needed later.
+
+### WQU auth guidance
+
+1. Do not try to reconstruct WQU login from Application-tab tracking cookies.
+2. Use `capture_playwright_state.py` and log in manually in the opened browser.
+3. `playwright_state.json` is the primary WQU auth mechanism.
+4. The saved Playwright storage state may contain mostly analytics cookies in
+   the plain cookie list, but the Playwright browser context can still open the
+   authenticated lesson correctly.
 
 ---
 
@@ -201,6 +253,37 @@ Implemented in `web_downloader.py`:
 
 This solved the last offline image issue.
 
+### WQU offline rendering issue
+
+Observed behavior:
+
+- The saved WQU HTML file looked "blank" when opened offline.
+- But inspection showed the lesson content was physically present in the HTML.
+- A headless browser check showed:
+  - `main.innerText` became empty after load when JS was kept
+  - visible text collapsed to the cookie banner / shell
+  - console errors referenced offline chunk loads such as `file:///assets/...`
+
+Root cause:
+
+- WQU client-side scripts rehydrated on `file://`
+- then attempted to load app chunks/root-relative assets in a way that broke
+  offline rendering
+- the app shell replaced the static lesson body in the visible DOM
+
+Final WQU fix:
+
+1. Save WQU pages with `REMOVE_JS=true`
+2. Do not inject the downloader runtime asset-fixup script when `REMOVE_JS=true`
+3. Rewrite `xlink:href` statically in HTML
+
+Result:
+
+- offline WQU pages keep the rendered lesson body visible
+- the main content remains readable on `file://`
+- some SVG sprite icons may still warn under `file://`, but the lesson content
+  now renders correctly
+
 ---
 
 ## 7. Key Code Changes
@@ -223,6 +306,12 @@ This solved the last offline image issue.
 - Added runtime offline asset fixup injection
 - Added structured `__NEXT_DATA__` asset rewriting
 - Added eager image handling for offline pages
+- Added flexible `.env` list parsing for JSON/comma URL lists
+- Added `PLAYWRIGHT_STORAGE_STATE` cookie import into the requests session
+- Added `learn.wqu.edu` site-mode hints
+- Added automatic `REMOVE_JS=true` adjustment for `learn.wqu.edu`
+- Added `xlink:href` rewriting for offline SVG sprite paths
+- Skipped runtime asset-fixup injection when `REMOVE_JS=true`
 
 ### In `.env.example`
 
@@ -234,6 +323,9 @@ Documented:
 - `STRIP_SELECTORS`
 - `FOLLOW_LINKS`
 - `AUTH_DEBUG`
+- WQU exact-URL example
+- `DESTINATION=~/Downloads/...`
+- `REMOVE_JS=true` for WQU
 
 ### In `web_downloader.md`
 
@@ -256,6 +348,34 @@ STRIP_SELECTORS=[class*="unlockAllBtn"]
 AUTO_AUTH_HEADER_FROM_COOKIE=true
 FOLLOW_LINKS=false
 AUTH_DEBUG=true
+```
+
+---
+
+## 9. Final Recommended Config for WQU
+
+Core settings:
+
+```env
+URL=https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes
+START_URLS=["https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes"]
+FOLLOW_LINKS=false
+PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=true
+PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+REMOVE_JS=true
+WAIT_FOR=main, article
+THREADS=1
+DESTINATION=~/Downloads/wqu
+```
+
+Capture browser state first:
+
+```bash
+cd dds
+uv run python capture_playwright_state.py \
+  --url https://learn.wqu.edu/my-courses/ \
+  --output playwright_state.json
 ```
 
 Notes:

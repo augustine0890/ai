@@ -19,14 +19,11 @@ produces a fully browsable offline copy you can open in any browser.
    cp .env.example .env
    ```
 
-3. **Edit `.env` with your details:**
-   - `URL` — the site you want to download
-   - `URL_PREFIX` — restrict crawling to a path subtree (e.g. `/courses/`)
-   - `COOKIE` — from DevTools Network tab (see [Getting cookies](#getting-cookie))
-   - `PLAYWRIGHT=true` — if the site is a JavaScript SPA (Next.js, React, etc.)
-   - `PLAYWRIGHT_PAGE_FETCH=false` — recommended for protected Next.js course sites like ByteByteGo
-   - `WAIT_FOR` — for SPAs, a CSS selector for the lesson/content area
-   - `DISCOVER_CHAPTERS=true` — for JS-driven course navigation
+3. **Edit `.env` with the profile that matches your site:**
+   - ByteByteGo course root: `DISCOVER_CHAPTERS=true`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=false`
+   - ByteByteGo exact lesson URLs: `FOLLOW_LINKS=false`, `START_URLS=[...]`
+   - WQU exact lesson URLs: `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json`, `REMOVE_JS=true`
+   - Public/static sites: usually just `URL=...`
 
 4. **Run:**
    ```bash
@@ -73,7 +70,7 @@ uv run python web_downloader.py
 | Variable | Required | Example |
 |---|---|---|
 | `URL` | Yes | `https://bytebytego.com/courses/tech-resume/` |
-| `START_URLS` | Optional | Multi-line/space-separated extra start URLs |
+| `START_URLS` | Optional | JSON/comma/newline/space-separated extra start URLs |
 | `URL_PREFIX` | Recommended | `/courses/` |
 | `SEED_URLS` | For JS-nav sites | See [Seed URLs](#seed-urls--sites-with-no-a-href-chapter-links) |
 | `COOKIE` | If behind login | `session=eyJhb...; id=123` |
@@ -93,7 +90,7 @@ uv run python web_downloader.py
 | `THREADS` | Optional | Default `1` (safe for rate-limiting) |
 | `DESTINATION` | Optional | Defaults to hostname-based folder |
 | `DOWNLOAD_EXTERNAL_ASSETS` | Optional | `true` to localize CDN assets |
-| `EXTERNAL_DOMAINS` | Optional | `cdn.site.com fonts.googleapis.com` |
+| `EXTERNAL_DOMAINS` | Optional | `cdn.site.com, fonts.googleapis.com` |
 | `USER_AGENT` | If using `cf_clearance` | Must match your browser's UA (see [cf_clearance and User-Agent](#cf_clearance-and-user-agent)) |
 | `DISCOVER_CHAPTERS` | For JS-nav course sites | `true` to auto-discover chapter URLs (requires `PLAYWRIGHT=true`) |
 
@@ -102,17 +99,33 @@ uv run python web_downloader.py
 - `MAX_PAGES=unlimited` (crawl until no new links found)
 - Everything else is empty unless set
 
+### Website profiles
+
+Use the profile that matches the site structure:
+
+| Website type | Recommended mode | Core settings |
+|---|---|---|
+| Public or server-rendered site | Simple crawl | `URL=...` |
+| ByteByteGo course root | Auto-discovery | `URL_PREFIX=/courses/`, `DISCOVER_CHAPTERS=true`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=false` |
+| ByteByteGo exact lessons | Explicit URL mode | `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=false` |
+| learn.wqu.edu lessons | Explicit URL mode with browser state | `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=true`, `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json`, `REMOVE_JS=true` |
+
 ### Simple mode (recommended baseline)
 
 If your goal is "download exactly the URLs I provide with assets", use:
 
 ```env
 FOLLOW_LINKS=false
-START_URLS="https://example.com/chapter-1
-https://example.com/chapter-2"
+START_URLS=["https://example.com/chapter-1","https://example.com/chapter-2"]
 ```
 
 This avoids full-site crawling and keeps behavior predictable.
+
+You can also write the same list as:
+
+```env
+START_URLS=https://example.com/chapter-1, https://example.com/chapter-2
+```
 
 ### Recommended ByteByteGo mode
 
@@ -125,6 +138,35 @@ STRIP_SELECTORS=[class*="unlockAllBtn"]
 ```
 
 This uses Playwright for discovery, `requests` for final protected HTML, keeps Next.js hydration for offline pages, and hides paywall buttons after offline load.
+
+### Recommended WQU mode
+
+```env
+FOLLOW_LINKS=false
+START_URLS=["https://learn.wqu.edu/.../lesson-1","https://learn.wqu.edu/.../lesson-2"]
+PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=true
+PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+REMOVE_JS=true
+WAIT_FOR=main, article
+```
+
+This uses explicit URL mode and a real logged-in browser state. For WQU, this
+is more reliable than trying to reconstruct auth from Application-tab cookies.
+`REMOVE_JS=true` is important for WQU offline output because the lesson HTML is
+already rendered; keeping the site app scripts causes the page to blank on
+`file://`.
+
+### Login and auth
+
+Use the auth method that matches the site:
+
+| Website | Do you need to paste token/cookie into `.env`? | How login works |
+|---|---|---|
+| ByteByteGo | Usually yes | Copy `COOKIE=...` from DevTools Network tab, or use `PLAYWRIGHT_STORAGE_STATE` as a fallback |
+| learn.wqu.edu | No, not in the recommended flow | Run `capture_playwright_state.py`, log in manually in the opened browser, save `playwright_state.json`, then use `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json` |
+
+For WQU, the login step is outside `.env`: you authenticate in the real browser window opened by `capture_playwright_state.py`.
 
 ---
 
@@ -263,6 +305,11 @@ refreshed DevTools, or the Network tab is empty).
 > `Cookie:` prefix. Do NOT accidentally delete the `token=`, `cf_clearance=`
 > or `csrf-token=` prefixes when pasting.
 
+> For `learn.wqu.edu`, a cookie table like `intercom-*`, `osano_*`, or `SLO_*`
+> is usually not enough to recreate login. Those are commonly support,
+> consent, or tracking cookies rather than the real authenticated browser
+> state. For WQU, prefer `PLAYWRIGHT_STORAGE_STATE`.
+
 #### Cookie reference for bytebytego.com
 
 Open `F12 → Application → Cookies → https://bytebytego.com` to see all of these:
@@ -338,6 +385,9 @@ When this happens, use a real Playwright `storage_state` file.
    ```
    With storage_state enabled, downloader avoids overlaying Playwright with
    `COOKIE`-derived auth headers/cookies to prevent stale-token conflicts.
+   It also imports first-party cookies from that storage file into the
+   downloader's `requests` session so protected asset downloads stay aligned
+   with the logged-in browser state.
 5. Run downloader again.
 
 ### Getting `HEADER_AUTHORIZATION` (Bearer token)
@@ -679,9 +729,43 @@ PLAYWRIGHT_PAGE_FETCH=false
 WAIT_FOR=[class*="lesson"], article, main
 REMOVE_JS=false
 FOLLOW_LINKS=false
-START_URLS="https://bytebytego.com/courses/tech-resume/p0-c2-introduction
-https://bytebytego.com/courses/tech-resume/p1-c2-the-hiring-pipeline"
+START_URLS=["https://bytebytego.com/courses/tech-resume/p0-c2-introduction","https://bytebytego.com/courses/tech-resume/p1-c2-the-hiring-pipeline"]
 THREADS=1
+```
+
+### learn.wqu.edu exact lesson URLs
+
+**.env:**
+```env
+URL=https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes
+FOLLOW_LINKS=false
+START_URLS=["https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes"]
+PLAYWRIGHT=true
+PLAYWRIGHT_PAGE_FETCH=true
+PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+REMOVE_JS=true
+WAIT_FOR=main, article
+THREADS=1
+DESTINATION=~/Downloads/wqu
+```
+
+Use this mode when you want to mirror one or more exact WQU lesson URLs.
+Do not rely on the Application-tab tracking cookies alone. Capture a real
+logged-in browser state first:
+
+```bash
+cd dds
+uv run python capture_playwright_state.py \
+  --url https://learn.wqu.edu/my-courses/ \
+  --output playwright_state.json
+```
+
+No token or cookie needs to be pasted into `.env` for this WQU flow.
+
+To add more lessons, extend `START_URLS`:
+
+```env
+START_URLS=["https://learn.wqu.edu/.../lesson-1","https://learn.wqu.edu/.../lesson-2"]
 ```
 
 ### Include CDN assets (fonts, images from external hosts)
@@ -690,7 +774,7 @@ THREADS=1
 ```env
 URL=https://somesite.com/
 DOWNLOAD_EXTERNAL_ASSETS=true
-EXTERNAL_DOMAINS=cdn.somesite.com fonts.gstatic.com cdn.jsdelivr.net
+EXTERNAL_DOMAINS=cdn.somesite.com, fonts.gstatic.com, cdn.jsdelivr.net
 THREADS=1
 ```
 
@@ -699,9 +783,12 @@ THREADS=1
 **.env:**
 ```env
 URL=https://somesite.com/docs/
-DESTINATION=./offline-documentation
+DESTINATION=~/Downloads/offline-documentation
 THREADS=1
 ```
+
+`DESTINATION=~/Downloads/...` works on both macOS and Windows. The downloader
+now expands `~` before writing files.
 
 ---
 
@@ -741,6 +828,7 @@ WAIT_FOR=[class*="lesson"], article, main
 REMOVE_JS=false
 STRIP_SELECTORS=[class*="unlockAllBtn"]
 THREADS=1
+DESTINATION=~/Downloads/bytebytego-tech-resume
 ```
 
 Run:

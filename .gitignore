@@ -70,6 +70,7 @@ data
 # Secrets and local config
 dds/input.json
 dds/.env
+dds/playwright_state.json
 
 # Go build artifacts and temporary files
 compress/compress
@@ -77,4 +78,3 @@ compress/compress.exe
 compress/tmp_pages/
 
 dds/bytebytego_com/
-
