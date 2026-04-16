@@ -364,6 +364,7 @@ to avoid common false auth failures from UA mismatch.
 | `_debug_auth_fail.html` created | Auth check failed | Open the debug file in a browser to see what Playwright actually received |
 | Cookie/header setup still shows guest page | Site also depends on browser localStorage auth state | Use `PLAYWRIGHT_STORAGE_STATE` from a real logged-in browser session |
 | Playwright discovery works but saved chapters become login/guest pages | Client hydration downgraded auth after initial HTML load | Set `PLAYWRIGHT_PAGE_FETCH=false`, keep `REMOVE_JS=false`, and use `STRIP_SELECTORS` to hide overlay buttons offline |
+| WQU output contains extra same-name files without extension that look blank | Metadata/canonical URLs were treated as assets in older runs | Update to latest script and re-run. New behavior skips non-resource `<link>` URLs and ignores asset downloads that return HTML |
 
 ---
 
@@ -737,7 +738,6 @@ THREADS=1
 
 **.env:**
 ```env
-URL=https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes
 FOLLOW_LINKS=false
 START_URLS=["https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes"]
 PLAYWRIGHT=true
@@ -750,6 +750,7 @@ DESTINATION=~/Downloads/wqu
 ```
 
 Use this mode when you want to mirror one or more exact WQU lesson URLs.
+When `START_URLS` is set and `FOLLOW_LINKS=false`, `URL` is optional.
 Do not rely on the Application-tab tracking cookies alone. Capture a real
 logged-in browser state first:
 

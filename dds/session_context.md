@@ -98,6 +98,10 @@ Extra implementation detail:
   when the user forgets to set it.
 - The downloader also rewrites `xlink:href` so SVG sprite references become
   local relative paths.
+- The downloader now skips non-resource `<link href>` values during asset
+  enqueueing (for example canonical/alternate metadata links) and skips any
+  asset response that returns HTML content-type. This prevents extra same-name
+  extensionless files that looked blank when opened offline.
 
 ---
 
@@ -312,6 +316,8 @@ Result:
 - Added automatic `REMOVE_JS=true` adjustment for `learn.wqu.edu`
 - Added `xlink:href` rewriting for offline SVG sprite paths
 - Skipped runtime asset-fixup injection when `REMOVE_JS=true`
+- Skipped non-resource `<link href>` metadata URLs during asset enqueueing
+- Skipped asset writes when response content-type is HTML
 
 ### In `.env.example`
 
@@ -357,7 +363,6 @@ AUTH_DEBUG=true
 Core settings:
 
 ```env
-URL=https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes
 START_URLS=["https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes"]
 FOLLOW_LINKS=false
 PLAYWRIGHT=true
@@ -380,6 +385,7 @@ uv run python capture_playwright_state.py \
 
 Notes:
 
+- `URL` is optional when `START_URLS` is set and `FOLLOW_LINKS=false`.
 - `FOLLOW_LINKS=false` is good for predictable queue behavior when using discovered/seeded URLs.
 - `COOKIE` must be refreshed when expired.
 - `USER_AGENT` is needed only if `cf_clearance` is used.

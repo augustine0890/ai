@@ -1600,6 +1600,19 @@ def fetch_binary(
 
         resp = SESSION.get(url, timeout=TIMEOUT, stream=True, headers=request_headers)
         resp.raise_for_status()
+        content_type = str(resp.headers.get("content-type", "")).lower()
+
+        # Assets that resolve to HTML are usually route fallbacks, auth redirects,
+        # or metadata links (for example canonical URLs), not real static files.
+        if "text/html" in content_type or "application/xhtml+xml" in content_type:
+            _log(
+                "asset_skip_html_response",
+                url=url,
+                dest=dest,
+                content_type=content_type,
+            )
+            resp.close()
+            return
 
         create_dir(dest.parent)
 
@@ -2568,6 +2581,14 @@ def crawl_site(
             for attr in ("src", "href", "data-src", "poster"):
                 if not tag.has_attr(attr):
                     continue
+
+                if tag.name == "link" and attr == "href":
+                    rel = tag.get("rel", [])
+                    if isinstance(rel, str):
+                        rel = [rel]
+                    rel_set = {str(r).lower() for r in rel if str(r).strip()}
+                    if not rel_set & RESOURCE_LINK_RELS:
+                        continue
 
                 link_raw = str(tag.get(attr, "")).strip()
                 if not link_raw:
