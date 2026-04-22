@@ -446,6 +446,60 @@ Recommended next-step areas:
 
 ---
 
+## 11b. SingleFile Output Mode
+
+The downloader now supports an alternative save format inspired by
+[SingleFile](https://www.getsinglefile.com/): every page becomes one
+self-contained `.html` file with all CSS, JS, images, and fonts inlined as
+`data:` URIs or inline `<style>` / `<script>` blocks.
+
+Enable with:
+
+```env
+SINGLE_FILE=true
+```
+
+Or pass `--single-file` on the CLI.
+
+Behavior:
+
+- Asset download queue / sidecar folders are bypassed entirely; assets are
+  fetched by the shared `requests` session and inlined at save time.
+- CSS `url(...)` and `@import` are resolved recursively (depth limited to 3).
+- `<link rel="preload">` and `modulepreload` are dropped so no network fetch
+  happens when the file is opened.
+- Inter-page `<a href>` links are **not** rewritten — each SingleFile page is
+  a standalone document.
+- Works with every existing auth mechanism (`COOKIE`, `HEADER_*`,
+  `PLAYWRIGHT_STORAGE_STATE`). Same SESSION fetches both the HTML and the
+  inlined assets.
+- First-party `Authorization` headers are stripped when inlining third-party
+  CDN assets (mirrors `fetch_binary` safety).
+- `REMOVE_JS=true` still works: scripts are dropped instead of inlined.
+- Unresolvable assets (404, HTML redirects) are left in place — the page
+  degrades gracefully. Per-page telemetry goes to `trace.jsonl` as
+  `single_file_inlined inlined=N failed=N unique_assets=N`.
+
+Key code added to `web_downloader.py`:
+
+- `MIME_BY_EXT`, `_guess_mime_type`, `_to_data_uri`
+- `_fetch_asset_bytes` (shared fetch with HTML-response guard + first-party
+  Authorization scoping)
+- `_inline_css_text` (recursive `url()` + `@import` inlining)
+- `_inline_srcset`, `_inline_one_url`
+- `inline_all_assets` (top-level entry point)
+- New `single_file` parameter on `crawl_site`
+- New CLI flag `--single-file` / env var `SINGLE_FILE`
+- DOM-walk short-circuits that skip asset-queue enqueue in single-file mode
+
+Trade-offs vs. the default sidecar mode:
+
+- Larger per-file size (~1.3× due to base64).
+- No shared assets across pages.
+- But: each file is portable, shareable, and has no relative-path concerns.
+
+---
+
 ## 12. Short Summary for Future LLMs
 
 ByteByteGo now works with this model:
@@ -460,3 +514,8 @@ ByteByteGo now works with this model:
 - force eager offline image loading
 
 That combination is the reason the downloader now works end to end.
+
+For single-archive workflows, `SINGLE_FILE=true` produces one self-contained
+`.html` per page with all CSS/JS/images/fonts inlined as `data:` URIs. It
+runs on the same fetch/auth pipeline and is an alternative output mode, not a
+replacement for sidecar mode.

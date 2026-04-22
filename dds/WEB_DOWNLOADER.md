@@ -4,6 +4,17 @@ Recursively crawls a website, downloads every HTML page and its static assets
 (CSS, JS, images, fonts), rewrites all links to relative local paths, and
 produces a fully browsable offline copy you can open in any browser.
 
+Two output modes are supported:
+
+- **Sidecar mode (default):** each page is saved as `.html` + a shared tree of
+  `_next/`, `cdn/`, etc. for assets. Smaller total size, shared assets across
+  pages, links rewritten to relative paths.
+- **SingleFile mode (`SINGLE_FILE=true`):** every page is saved as one
+  self-contained `.html` with all CSS, JS, images, and fonts inlined as
+  `data:` URIs / inline blocks. Each file opens standalone, can be shared or
+  archived as a single document. Inspired by
+  [SingleFile](https://www.getsinglefile.com/).
+
 ---
 
 ## Quick Start
@@ -93,6 +104,7 @@ uv run python web_downloader.py
 | `EXTERNAL_DOMAINS` | Optional | `cdn.site.com, fonts.googleapis.com` |
 | `USER_AGENT` | If using `cf_clearance` | Must match your browser's UA (see [cf_clearance and User-Agent](#cf_clearance-and-user-agent)) |
 | `DISCOVER_CHAPTERS` | For JS-nav course sites | `true` to auto-discover chapter URLs (requires `PLAYWRIGHT=true`) |
+| `SINGLE_FILE` | Optional | `true` to save each page as one self-contained `.html` with all assets inlined as `data:` URIs |
 
 **Defaults:**
 - `THREADS=1` (conservative, avoids rate limiting)
@@ -889,8 +901,65 @@ All of these can be set in `.env` file (recommended) or via CLI (for quick overr
 | `--follow-links` | `FOLLOW_LINKS` | on | Follow discovered page links (`false` = explicit URL-only mode) |
 | `--auth-debug` | `AUTH_DEBUG` | off | Emit detailed Playwright auth/network diagnostics |
 | `--discover-chapters` | `DISCOVER_CHAPTERS` | off | Auto-discover chapter URLs from course root before crawling (requires Playwright) |
+| `--single-file` | `SINGLE_FILE` | off | Save each page as one self-contained `.html` with all assets inlined (no sidecar folders) |
 | `--download-external-assets` | `DOWNLOAD_EXTERNAL_ASSETS` | off | Download and localize CDN/external assets |
 | `--external-domains` | `EXTERNAL_DOMAINS` | — | Space-separated whitelist of CDN domains |
+
+---
+
+## SingleFile mode
+
+Set `SINGLE_FILE=true` (or pass `--single-file`) to save each page as one
+self-contained HTML document. Every stylesheet, image, font, favicon, and
+`<script src>` is fetched and inlined — CSS becomes a `<style>` block,
+binary assets become base64 `data:` URIs, `@import` chains are followed
+recursively. No sidecar `_next/` or `cdn/` folders are produced.
+
+### When to use it
+
+- You want to archive a single page and share/email it as one file.
+- You want each page to open offline with zero relative-path concerns.
+- You don't need cross-page navigation in the saved output.
+
+### Trade-offs vs. sidecar mode
+
+| | Sidecar (default) | SingleFile |
+|---|---|---|
+| Output per page | `.html` + shared `_next/`, `cdn/` trees | one `.html` only |
+| Typical file size | smaller (assets shared) | ~1.3× due to base64 |
+| Inter-page `<a>` links | rewritten to local relative paths | left as original URLs |
+| Best for | full site mirrors | single-page archives |
+
+### Behavior notes
+
+- Works with every auth mechanism (cookies, `PLAYWRIGHT_STORAGE_STATE`,
+  custom headers) — the same `requests` session fetches both HTML and
+  inlined assets.
+- `<link rel="preload">` / `modulepreload` are dropped (they'd try to
+  fetch over the network at open time).
+- `<a href>` between crawled pages is **not rewritten**. In SingleFile mode
+  each page is a standalone document.
+- Unresolvable assets (404 / auth fail) are left in place so the page
+  degrades gracefully. The `single_file_inlined` trace event reports
+  `inlined=N failed=N unique_assets=N` per page.
+- `REMOVE_JS=true` still works — scripts are stripped instead of inlined.
+
+### Example `.env`
+
+```env
+URL=https://example.com/some-article
+FOLLOW_LINKS=false
+SINGLE_FILE=true
+DESTINATION=~/Downloads/archive
+```
+
+Run:
+
+```bash
+uv run python web_downloader.py
+```
+
+Output: one `.html` file per URL in `~/Downloads/archive/`.
 
 ---
 

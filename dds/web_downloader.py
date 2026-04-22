@@ -2064,6 +2064,376 @@ def extract_css_assets(css_text: str) -> list[str]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# SingleFile mode: inline every asset as a data: URI or inline text block
+# so one .html is fully self-contained when opened offline.
+# ---------------------------------------------------------------------------
+
+MIME_BY_EXT = {
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".mjs": "application/javascript",
+    ".json": "application/json",
+    ".wasm": "application/wasm",
+    ".webmanifest": "application/manifest+json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".eot": "application/vnd.ms-fontobject",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+}
+
+
+def _guess_mime_type(url: str, content_type: str = "") -> str:
+    """Pick a MIME type, preferring response header over URL extension."""
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    if ct and ct not in ("application/octet-stream", "binary/octet-stream"):
+        return ct
+    ext = Path(urlparse(url).path).suffix.lower()
+    return MIME_BY_EXT.get(ext, "application/octet-stream")
+
+
+def _fetch_asset_bytes(url: str) -> Optional[tuple[bytes, str]]:
+    """
+    Fetch a URL via the shared SESSION and return (bytes, content_type).
+
+    Returns None on network/HTTP error or when the response is HTML (usually a
+    login redirect or canonical metadata link, not a real asset).
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        request_headers = None
+        # Mirror fetch_binary: never forward first-party bearer tokens to CDNs.
+        if host and any(k.lower() == "authorization" for k in SESSION.headers.keys()):
+            # Heuristic: treat anything not matching the session's primary
+            # cookie domains as external. We strip to be safe — inlining is
+            # best-effort.
+            first_party_cookie_domains = {
+                str(c.domain).lstrip(".").lower()
+                for c in SESSION.cookies
+                if getattr(c, "domain", None)
+            }
+            is_first_party = any(
+                host == d or host.endswith("." + d) for d in first_party_cookie_domains
+            )
+            if not is_first_party:
+                request_headers = {"Authorization": None}
+
+        resp = SESSION.get(url, timeout=TIMEOUT, headers=request_headers)
+        if resp.status_code >= 400:
+            return None
+        content_type = str(resp.headers.get("content-type", ""))
+        if "text/html" in content_type.lower() or "application/xhtml+xml" in content_type.lower():
+            return None
+        return resp.content, content_type
+    except requests.RequestException:
+        return None
+
+
+def _to_data_uri(data: bytes, mime: str) -> str:
+    """Build a base64 data: URI. Base64 keeps arbitrary bytes safe inside HTML."""
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def _inline_css_text(
+    css_text: str,
+    css_base_url: str,
+    cache: dict[str, Optional[str]],
+    depth: int = 0,
+) -> str:
+    """
+    Rewrite url(...) and @import in a CSS string so every reference is either
+    a data: URI or a fully inlined @import (recursively).
+
+    css_base_url is the URL the CSS was fetched from — relative url()s are
+    resolved against it, not against the page URL, to match browser behavior.
+    """
+    if depth > 3:
+        return css_text  # guard against pathological @import loops
+
+    def _resolve_inline(raw: str, is_import: bool = False) -> Optional[str]:
+        candidate = _protocol_fix(raw, css_base_url)
+        if (
+            not candidate
+            or candidate.startswith(("#", "data:", "javascript:", "about:", "blob:"))
+            or is_non_fetchable(candidate)
+            or not is_httpish(candidate)
+        ):
+            return None
+        abs_url = canonicalize_url(candidate, css_base_url)
+        if abs_url in cache:
+            return cache[abs_url]
+        fetched = _fetch_asset_bytes(abs_url)
+        if fetched is None:
+            cache[abs_url] = None
+            return None
+        data, content_type = fetched
+        if is_import:
+            # Inline imported CSS directly as text (after recursive inlining).
+            try:
+                nested = data.decode("utf-8", errors="replace")
+            except Exception:  # pragma: no cover — defensive
+                cache[abs_url] = None
+                return None
+            inlined = _inline_css_text(nested, abs_url, cache, depth + 1)
+            cache[abs_url] = inlined
+            return inlined
+        mime = _guess_mime_type(abs_url, content_type)
+        uri = _to_data_uri(data, mime)
+        cache[abs_url] = uri
+        return uri
+
+    def _sub_url(match: re.Match) -> str:
+        raw = match.group(1).strip().strip("'\"")
+        uri = _resolve_inline(raw, is_import=False)
+        if uri is None:
+            return match.group(0)
+        return f'url("{uri}")'
+
+    out = CSS_URL_RE.sub(_sub_url, css_text)
+
+    def _sub_import(match: re.Match) -> str:
+        raw = match.group(1).strip().strip("'\"")
+        inlined = _resolve_inline(raw, is_import=True)
+        if inlined is None:
+            return match.group(0)
+        return inlined
+
+    out = CSS_IMPORT_RE.sub(_sub_import, out)
+    return out
+
+
+def _inline_srcset(raw: str, page_url: str, cache: dict[str, Optional[str]]) -> str:
+    """Rewrite each URL in an srcset="..." string into a data: URI."""
+    parts_out: list[str] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        tokens = entry.split()
+        if not tokens:
+            continue
+        url_part = _protocol_fix(tokens[0], page_url)
+        if (
+            url_part.startswith(("#", "data:", "javascript:", "about:", "blob:"))
+            or is_non_fetchable(url_part)
+            or not is_httpish(url_part)
+        ):
+            parts_out.append(entry)
+            continue
+        abs_url = canonicalize_url(url_part, page_url)
+        uri = cache.get(abs_url, "__miss__")
+        if uri == "__miss__":
+            fetched = _fetch_asset_bytes(abs_url)
+            if fetched is None:
+                cache[abs_url] = None
+                uri = None
+            else:
+                data, content_type = fetched
+                uri = _to_data_uri(data, _guess_mime_type(abs_url, content_type))
+                cache[abs_url] = uri
+        if uri:
+            tokens[0] = uri
+            parts_out.append(" ".join(tokens))
+        else:
+            parts_out.append(entry)
+    return ", ".join(parts_out)
+
+
+def _inline_one_url(
+    raw: str,
+    page_url: str,
+    cache: dict[str, Optional[str]],
+) -> Optional[str]:
+    """Fetch a single URL and return its data: URI, or None if skipped/failed."""
+    candidate = _protocol_fix(raw, page_url)
+    if (
+        not candidate
+        or candidate.startswith(("#", "data:", "javascript:", "about:", "blob:"))
+        or is_non_fetchable(candidate)
+        or not is_httpish(candidate)
+    ):
+        return None
+    abs_url = canonicalize_url(candidate, page_url)
+    if abs_url in cache:
+        return cache[abs_url]
+    fetched = _fetch_asset_bytes(abs_url)
+    if fetched is None:
+        cache[abs_url] = None
+        return None
+    data, content_type = fetched
+    uri = _to_data_uri(data, _guess_mime_type(abs_url, content_type))
+    cache[abs_url] = uri
+    return uri
+
+
+def inline_all_assets(
+    soup: BeautifulSoup,
+    page_url: str,
+    remove_js: bool = False,
+) -> dict:
+    """
+    Transform `soup` into a fully self-contained HTML tree.
+
+    All external resources (CSS, JS, images, fonts, favicons) are fetched and
+    inlined as <style>/<script>/data: URIs. The result is one HTML document
+    that opens offline with no sidecar asset files.
+
+    Unresolvable assets (404, auth failure, non-http scheme) are left in place
+    so the page degrades gracefully instead of erroring out.
+    """
+    cache: dict[str, Optional[str]] = {}
+    inlined = 0
+    failed = 0
+
+    # <base href> breaks data:-URI resolution and offline rendering.
+    base_tag = soup.find("base")
+    if base_tag is not None and base_tag.has_attr("href"):
+        base_tag.decompose()
+
+    # 1) <link rel="stylesheet"> → fetch CSS, recursively inline its url()s,
+    #    replace the <link> with a <style> block.
+    for link_tag in list(soup.find_all("link")):
+        rel = link_tag.get("rel", [])
+        if isinstance(rel, str):
+            rel = [rel]
+        rel_set = {str(r).lower() for r in rel if str(r).strip()}
+        href = str(link_tag.get("href", "")).strip()
+        if not href:
+            continue
+
+        if "stylesheet" in rel_set:
+            abs_url = canonicalize_url(_protocol_fix(href, page_url), page_url)
+            if (
+                not is_httpish(abs_url)
+                or is_non_fetchable(abs_url)
+                or abs_url.startswith("data:")
+            ):
+                continue
+            fetched = _fetch_asset_bytes(abs_url)
+            if fetched is None:
+                failed += 1
+                continue
+            css_bytes, _ctype = fetched
+            css_text = css_bytes.decode("utf-8", errors="replace")
+            css_inlined = _inline_css_text(css_text, abs_url, cache)
+            style_tag = soup.new_tag("style")
+            style_tag["data-dds-inlined-href"] = abs_url
+            if link_tag.get("media"):
+                style_tag["media"] = link_tag["media"]
+            style_tag.string = css_inlined
+            link_tag.replace_with(style_tag)
+            inlined += 1
+        elif rel_set & {"icon", "shortcut icon", "apple-touch-icon", "mask-icon"}:
+            uri = _inline_one_url(href, page_url, cache)
+            if uri:
+                link_tag["href"] = uri
+                inlined += 1
+            else:
+                failed += 1
+        elif "preload" in rel_set or "modulepreload" in rel_set:
+            # Preloads reference assets we'll (hopefully) inline elsewhere.
+            # Remove them so the browser doesn't fetch network URLs offline.
+            link_tag.decompose()
+
+    # 2) <style> blocks: rewrite url() and @import in-place.
+    for style_tag in soup.find_all("style"):
+        if style_tag.get("data-dds-inlined-href") or style_tag.get("data-dds-runtime-hide"):
+            continue
+        text = style_tag.string or style_tag.get_text() or ""
+        if not text.strip():
+            continue
+        style_tag.string = _inline_css_text(text, page_url, cache)
+
+    # 3) Scripts. If remove_js, drop them; otherwise inline src=...
+    if remove_js:
+        for s_tag in soup.find_all("script"):
+            s_tag.decompose()
+    else:
+        for script_tag in list(soup.find_all("script")):
+            src = str(script_tag.get("src", "")).strip()
+            if not src:
+                continue
+            abs_url = canonicalize_url(_protocol_fix(src, page_url), page_url)
+            if (
+                not is_httpish(abs_url)
+                or is_non_fetchable(abs_url)
+                or abs_url.startswith("data:")
+            ):
+                continue
+            fetched = _fetch_asset_bytes(abs_url)
+            if fetched is None:
+                failed += 1
+                continue
+            js_bytes, _ctype = fetched
+            script_tag.string = js_bytes.decode("utf-8", errors="replace")
+            del script_tag["src"]
+            for drop_attr in ("integrity", "crossorigin", "nomodule"):
+                if script_tag.has_attr(drop_attr):
+                    del script_tag[drop_attr]
+            script_tag["data-dds-inlined-src"] = abs_url
+            inlined += 1
+
+    # 4) Images, media, iframes, SVG <use> and <image>, poster frames.
+    URL_ATTRS = ("src", "data-src", "poster", "xlink:href")
+    for tag in soup.find_all(True):
+        if tag.name == "img" and str(tag.get("loading", "")).lower() == "lazy":
+            tag["loading"] = "eager"
+
+        # Lazy-load frameworks often park the real URL in data-src.
+        if tag.name in ("img", "source") and tag.has_attr("data-src") and not tag.has_attr("src"):
+            tag["src"] = tag["data-src"]
+
+        for attr in URL_ATTRS:
+            if not tag.has_attr(attr):
+                continue
+            raw = str(tag.get(attr, "")).strip()
+            if not raw:
+                continue
+            # Don't inline hrefs that are plain page anchors — only resource-ish attrs.
+            if attr == "href":
+                continue
+            uri = _inline_one_url(raw, page_url, cache)
+            if uri:
+                tag[attr] = uri
+                inlined += 1
+            elif cache.get(canonicalize_url(_protocol_fix(raw, page_url), page_url)) is None and is_httpish(raw):
+                failed += 1
+
+        if tag.has_attr("srcset"):
+            tag["srcset"] = _inline_srcset(str(tag["srcset"]), page_url, cache)
+
+        if tag.has_attr("style"):
+            style_val = str(tag["style"])
+            new_style = _inline_css_text(style_val, page_url, cache)
+            if new_style != style_val:
+                tag["style"] = new_style
+
+        # Drop SRI/crossorigin attrs — they don't apply to inlined content
+        # and can block some browsers from using data: URIs.
+        for drop_attr in ("integrity", "crossorigin"):
+            if tag.has_attr(drop_attr):
+                del tag[drop_attr]
+
+    # 5) <a href> to other crawled pages remains as-is. In SingleFile mode each
+    #    page is a standalone document, so we do NOT rewrite inter-page links
+    #    — they stay pointing at the live site. Users navigate via filesystem.
+
+    return {"inlined": inlined, "failed": failed, "cache_size": len(cache)}
+
+
 def _slug_parts(value: object) -> list[str]:
     """
     Normalize a slug value into clean path segments.
@@ -2425,6 +2795,7 @@ def crawl_site(
     auth_fail_text: Optional[str] = None,
     follow_links: bool = True,
     strip_selectors: Optional[list[str]] = None,
+    single_file: bool = False,
 ) -> None:
     """
     Breadth-first crawl limited to max_pages.
@@ -2626,6 +2997,9 @@ def crawl_site(
                     continue
 
                 # Otherwise treat it as an asset candidate.
+                # In single-file mode, assets are inlined at save time, not downloaded.
+                if single_file:
+                    continue
                 if is_ext:
                     if not download_external_assets:
                         continue
@@ -2649,6 +3023,11 @@ def crawl_site(
                     queued_assets.add(abs_url)
                     create_dir(dest_path.parent)
                     download_q.put((abs_url, dest_path))
+
+            # Remaining blocks below enqueue assets for sidecar download.
+            # In single-file mode we inline at save time, so skip them.
+            if single_file:
+                continue
 
             # ------------------------------------------------------------------
             # META IMAGE SUPPORT (og:image, twitter:image)
@@ -2829,17 +3208,27 @@ def crawl_site(
 
         local_path = to_local_path(urlparse(page_url), root)
         create_dir(local_path.parent)
-        if not remove_js and inject_runtime_asset_fixups(soup, root, local_path.parent):
-            _log("runtime_asset_fixups_injected", url=page_url)
-        rewrite_links(
-            soup,
-            page_url,
-            root,
-            local_path.parent,
-            download_external_assets,
-            external_domains,
-            download_q,
-        )
+        if single_file:
+            summary = inline_all_assets(soup, page_url, remove_js=remove_js)
+            _log(
+                "single_file_inlined",
+                url=page_url,
+                inlined=summary["inlined"],
+                failed=summary["failed"],
+                unique_assets=summary["cache_size"],
+            )
+        else:
+            if not remove_js and inject_runtime_asset_fixups(soup, root, local_path.parent):
+                _log("runtime_asset_fixups_injected", url=page_url)
+            rewrite_links(
+                soup,
+                page_url,
+                root,
+                local_path.parent,
+                download_external_assets,
+                external_domains,
+                download_q,
+            )
         safe_write_text(local_path, str(soup), encoding="utf-8")
 
     # Wait for all queued asset downloads to finish
@@ -2937,6 +3326,7 @@ def parse_args() -> argparse.Namespace:
     env_strip_selectors = parse_env_csv_list(_strip_raw)
     env_destination = os.getenv("DESTINATION") or None
     env_discover_chapters = os.getenv("DISCOVER_CHAPTERS", "false").lower() in ("1", "true", "yes")
+    env_single_file = os.getenv("SINGLE_FILE", "false").lower() in ("1", "true", "yes")
 
     _max = os.getenv("MAX_PAGES", "")
     env_max_pages = int(_max) if _max.strip().isdigit() and int(_max) > 0 else sys.maxsize
@@ -3170,6 +3560,17 @@ def parse_args() -> argparse.Namespace:
             "Use to strip paywall overlays, cookie banners, etc. that hide real content. "
             "The content underneath is preserved. "
             "Can be set via STRIP_SELECTORS= (comma-separated) in .env."
+        ),
+    )
+    p.add_argument(
+        "--single-file",
+        action=argparse.BooleanOptionalAction,
+        default=env_single_file,
+        dest="single_file",
+        help=(
+            "Save each page as a single self-contained .html with all CSS, JS, "
+            "images, and fonts inlined as data: URIs / inline blocks (SingleFile-style). "
+            "No sidecar asset folders are produced. Can be set via SINGLE_FILE=true in .env."
         ),
     )
     p.add_argument(
@@ -3574,6 +3975,7 @@ if __name__ == "__main__":
             auth_fail_text=args.auth_fail_text,
             follow_links=bool(args.follow_links),
             strip_selectors=args.strip_selectors or None,
+            single_file=bool(args.single_file),
         )
     finally:
         if _pw_stack is not None:
