@@ -8,7 +8,7 @@ working.
 
 ## Prompt
 
-```
+~~~text
 You are executing the plan in `<PLAN_PATH>`. Read it in full, understand
 the scope and verification criteria, then implement the steps.
 
@@ -18,9 +18,9 @@ the scope and verification criteria, then implement the steps.
    `session_context.md`, read that too so you understand the rationale.
 2. Read the source files, notebooks, or configs that the plan will touch
    so you understand the target shape and dependencies.
-3. Identify any prerequisites listed in §2 of the plan. If they are not
+3. Identify any prerequisites listed in Section 2 of the plan. If they are not
    met, STOP and list them before proceeding.
-4. Identify the success criteria in §6 (Verification). You will run these
+4. Identify the success criteria in Section 6 (Verification). You will run these
    checks after each step.
 
 ## Execution protocol
@@ -40,7 +40,7 @@ Follow this protocol for EACH step in the plan:
      a draft section
 
 3. After the step completes:
-   - Run the verification command(s) from §6 that apply to this step
+   - Run the verification command(s) from Section 6 that apply to this step
    - Report the result: PASS or FAIL
    - If FAIL: stop, diagnose, ask for help (do not skip the step)
    - If PASS: move to the next step
@@ -70,7 +70,7 @@ If the blocker reveals that the plan's scope has shifted materially:
 
 For each step, output:
 
-```
+```text
 ### Step N.M: <step title from plan>
 **Action:** <one-line summary of what you are doing>
 **Command:** <exact command, if applicable>
@@ -80,13 +80,13 @@ For each step, output:
 
 After each step completes, show the updated status line:
 
-```
+```text
 | N.M | <step description> | Done |
 ```
 
 At the end, show a summary:
 
-```
+```text
 ## Execution Summary
 - Steps completed: N / M
 - Verification: PASS | FAIL
@@ -113,7 +113,7 @@ At the end, show a summary:
 - Do run verification checks after each step.
 - Do update the plan file status as you complete steps.
 - Do report blockers immediately and completely.
-```
+~~~
 
 ---
 
@@ -121,7 +121,7 @@ At the end, show a summary:
 
 You have `experiments/churn-v3/plan-baseline.md` and are ready to train.
 
-```
+```text
 Please execute the plan at experiments/churn-v3/plan-baseline.md.
 Reference session_context.md for rationale if needed.
 
@@ -133,7 +133,7 @@ status and pause if anything fails.
 
 Claude reads the plan and begins:
 
-```
+```text
 ### Step 5.1: Pull event data for 2025-01-01 to 2025-04-01; verify 50M rows
 **Action:** Query warehouse for user events in date range
 **Command:** python scripts/pull_events.py --start 2025-01-01 --end 2025-04-01
