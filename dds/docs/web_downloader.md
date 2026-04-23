@@ -33,12 +33,12 @@ Two output modes are supported:
 3. **Edit `.env` with the profile that matches your site:**
    - ByteByteGo course root: `DISCOVER_CHAPTERS=true`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=false`
    - ByteByteGo exact lesson URLs: `FOLLOW_LINKS=false`, `START_URLS=[...]`
-   - WQU exact lesson URLs: `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json`, `REMOVE_JS=true`
+   - WQU exact lesson URLs: `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json`, `REMOVE_JS=true`
    - Public/static sites: usually just `URL=...`
 
 4. **Run:**
    ```bash
-   uv run python web_downloader.py
+   uv run python -m dds.web_downloader
    ```
 
 That's it. Everything is configured via `.env` — no CLI args needed. All values can still be overridden on the command line if you want.
@@ -74,7 +74,7 @@ All configuration lives in a `.env` file in the `dds/` directory. The script aut
 ```bash
 cp .env.example .env
 nano .env          # or your editor of choice
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
 **Key variables:**
@@ -90,7 +90,7 @@ uv run python web_downloader.py
 | `HEADER_*` | Optional | Any header: `HEADER_X_CUSTOM=value` |
 | `PLAYWRIGHT` | If SPA (Next.js/React) | `true` |
 | `PLAYWRIGHT_PAGE_FETCH` | Optional | `false` to use Playwright for discovery only and fetch page HTML via `requests` |
-| `PLAYWRIGHT_STORAGE_STATE` | Recommended fallback for hard auth | `./playwright_state.json` |
+| `PLAYWRIGHT_STORAGE_STATE` | Recommended fallback for hard auth | `./output/playwright_state.json` |
 | `WAIT_FOR` | For SPA content | `[class*="lesson"], article` |
 | `RENDER_SETTLE_MS` | For SPA auth/state hydration | `4000` |
 | `REMOVE_JS` | Optional | `false` to keep Next.js hydration for offline pages |
@@ -121,7 +121,7 @@ Use the profile that matches the site structure:
 | Public or server-rendered site | Simple crawl | `URL=...` |
 | ByteByteGo course root | Auto-discovery | `URL_PREFIX=/courses/`, `DISCOVER_CHAPTERS=true`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=false` |
 | ByteByteGo exact lessons | Explicit URL mode | `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=false` |
-| learn.wqu.edu lessons | Explicit URL mode with browser state | `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=true`, `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json`, `REMOVE_JS=true` |
+| learn.wqu.edu lessons | Explicit URL mode with browser state | `FOLLOW_LINKS=false`, `START_URLS=[...]`, `PLAYWRIGHT=true`, `PLAYWRIGHT_PAGE_FETCH=true`, `PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json`, `REMOVE_JS=true` |
 
 ### Simple mode (recommended baseline)
 
@@ -159,7 +159,7 @@ FOLLOW_LINKS=false
 START_URLS=["https://learn.wqu.edu/.../lesson-1","https://learn.wqu.edu/.../lesson-2"]
 PLAYWRIGHT=true
 PLAYWRIGHT_PAGE_FETCH=true
-PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json
 REMOVE_JS=true
 WAIT_FOR=main, article
 ```
@@ -177,9 +177,9 @@ Use the auth method that matches the site:
 | Website | Do you need to paste token/cookie into `.env`? | How login works |
 |---|---|---|
 | ByteByteGo | Usually yes | Copy `COOKIE=...` from DevTools Network tab, or use `PLAYWRIGHT_STORAGE_STATE` as a fallback |
-| learn.wqu.edu | No, not in the recommended flow | Run `capture_playwright_state.py`, log in manually in the opened browser, save `playwright_state.json`, then use `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json` |
+| learn.wqu.edu | No, not in the recommended flow | Run `python -m dds.web_downloader.capture_playwright_state`, log in manually in the opened browser, save `output/playwright_state.json`, then use `PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json` |
 
-For WQU, the login step is outside `.env`: you authenticate in the real browser window opened by `capture_playwright_state.py`.
+For WQU, the login step is outside `.env`: you authenticate in the real browser window opened by `python -m dds.web_downloader.capture_playwright_state`.
 
 ---
 
@@ -199,7 +199,7 @@ Three ready-to-use `.env` templates live in `dds/profiles/`. Each is complete fo
 cd dds
 cp profiles/.env.bytebytego-courses .env    # or another profile
 # edit .env - paste COOKIE, set URL
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
 ### Switching sites
@@ -209,10 +209,10 @@ Just copy a different profile over `.env`:
 ```bash
 cp profiles/.env.wqu .env
 # capture browser state first for WQU
-uv run python capture_playwright_state.py \
+uv run python -m dds.web_downloader.capture_playwright_state \
   --url https://learn.wqu.edu/my-courses/ \
-  --output playwright_state.json
-uv run python web_downloader.py
+  --output output/playwright_state.json
+uv run python -m dds.web_downloader
 ```
 
 Already-downloaded files are skipped automatically - you can crawl multiple sites into the same filesystem without re-downloading.
@@ -429,13 +429,13 @@ When this happens, use a real Playwright `storage_state` file.
 1. Generate state from a logged-in browser session:
    ```bash
    cd dds
-   uv run python capture_playwright_state.py --output playwright_state.json
+   uv run python -m dds.web_downloader.capture_playwright_state --output output/playwright_state.json
    ```
 2. Log in in the opened browser window and confirm paid course content is visible.
 3. Press Enter in terminal to save state.
 4. Set in `.env`:
    ```env
-   PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+   PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json
    ```
    With storage_state enabled, downloader avoids overlaying Playwright with
    `COOKIE`-derived auth headers/cookies to prevent stale-token conflicts.
@@ -541,7 +541,7 @@ stripped, so `URL_PREFIX=courses`, `/courses`, `/courses/` all work the same.
 ### CLI equivalent
 
 ```bash
-uv run python web_downloader.py --url-prefix /courses/
+uv run python -m dds.web_downloader --url-prefix /courses/
 ```
 
 ---
@@ -565,7 +565,7 @@ PLAYWRIGHT=true        # required — discovery runs with a real browser
 Run:
 
 ```bash
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
 The script will:
@@ -575,7 +575,7 @@ The script will:
 4. Merge DOM links, sidebar `data-menu-id`, and `__NEXT_DATA__`
 5. Add all discovered chapter URLs to the crawl queue before the main crawl begins
 
-### What you'll see in trace.jsonl
+### What you'll see in output/trace.jsonl
 
 ```
 chapter_discovery_start        — discovery phase begins
@@ -681,7 +681,7 @@ SEED_URLS=
 Use `--seed-url` (repeatable):
 
 ```bash
-uv run python web_downloader.py \
+uv run python -m dds.web_downloader \
   --seed-url https://bytebytego.com/courses/tech-resume/p0-acknowledgements \
   --seed-url https://bytebytego.com/courses/tech-resume/p1-c1-why-resumes-and-cvs-are-important \
   --seed-url https://bytebytego.com/courses/tech-resume/p2-c3-tech-resume-basics
@@ -693,7 +693,7 @@ uv run python web_downloader.py \
 
 All examples below are `.env` files. After creating one, just run:
 ```bash
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
 ### Basic public site (no auth needed)
@@ -795,7 +795,7 @@ FOLLOW_LINKS=false
 START_URLS=["https://learn.wqu.edu/my-courses/courses/financial-markets/modules/m-1-credit-risk-and-financing/tasks/lesson-1-saving-borrowing-lesson-notes"]
 PLAYWRIGHT=true
 PLAYWRIGHT_PAGE_FETCH=true
-PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json
 REMOVE_JS=true
 WAIT_FOR=main, article
 THREADS=1
@@ -809,9 +809,9 @@ logged-in browser state first:
 
 ```bash
 cd dds
-uv run python capture_playwright_state.py \
+uv run python -m dds.web_downloader.capture_playwright_state \
   --url https://learn.wqu.edu/my-courses/ \
-  --output playwright_state.json
+  --output output/playwright_state.json
 ```
 
 No token or cookie needs to be pasted into `.env` for this WQU flow.
@@ -888,7 +888,7 @@ DESTINATION=~/Downloads/bytebytego-tech-resume
 Run:
 
 ```bash
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
 ### What `WAIT_FOR` does
@@ -997,7 +997,7 @@ DESTINATION=~/Downloads/archive
 Run:
 
 ```bash
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
 Output: one `.html` file per URL in `~/Downloads/archive/`.
@@ -1040,3 +1040,4 @@ you can open `index.html` directly in a browser with no server.
 | Session cookies expire | Re-copy fresh cookies from DevTools and re-run (`cf_clearance` expires in ~30 min) |
 | 404 assets (broken site references) | Logged as `WARN` (`asset_not_found`) — safe to ignore |
 | Offline images still break on `file://` for Next.js pages | Keep `REMOVE_JS=false` and use the current runtime asset-fix injection logic in `web_downloader.py` |
+

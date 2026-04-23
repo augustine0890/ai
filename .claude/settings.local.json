@@ -4,7 +4,9 @@
       "Bash(uv run:*)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('web_downloader.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(ls dds/bytebytego_com/ dds/profiles/)",
+      "Bash(ls dds/profiles/)"
     ]
   }
 }

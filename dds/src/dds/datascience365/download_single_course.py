@@ -1,4 +1,4 @@
-import json
+﻿import json
 import shutil
 import string
 import subprocess
@@ -10,12 +10,13 @@ from urllib.parse import urlparse
 import requests
 import yt_dlp
 import imageio_ffmpeg
-from course_model import CourseModel, VideoItem
-from video_model import VideoModel
+from dds.datascience365.course_model import CourseModel, VideoItem
+from dds.datascience365.video_model import VideoModel
 
 
 # Global state to share updated token across functions mid-run
 _CURRENT_AUTH_TOKEN = None
+_CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
 
 def get_auth_token(fallback: str) -> str:
     global _CURRENT_AUTH_TOKEN
@@ -24,7 +25,7 @@ def get_auth_token(fallback: str) -> str:
 def update_auth_token(new_token: str) -> None:
     global _CURRENT_AUTH_TOKEN
     _CURRENT_AUTH_TOKEN = new_token
-    input_file = Path(__file__).parent / "input.json"
+    input_file = _CONFIG_DIR / "input.json"
     if input_file.exists():
         try:
             data = json.loads(input_file.read_text(encoding="utf-8"))
@@ -35,16 +36,16 @@ def update_auth_token(new_token: str) -> None:
 
 
 def prompt_new_token(skip_label: str = "skip") -> str | None:
-    """Ask the user to update input.json instead of pasting in the terminal.
+    """Ask the user to update config/input.json instead of pasting in the terminal.
 
     Returns the new token string, or None if the user chose to skip/abort.
-    Reads the token from input.json after the user confirms, avoiding
+    Reads the token from config/input.json after the user confirms, avoiding
     terminal chunking issues with long Bearer tokens.
     """
-    input_file = Path(__file__).parent / "input.json"
-    print(f"\n  → Open  {input_file}")
-    print(    "  → Replace the value of \"authorization_token\" with your new token")
-    print(   f"  → Press Enter when done, or type 's' to {skip_label}: ", end="", flush=True)
+    input_file = _CONFIG_DIR / "input.json"
+    print(f"\n  â†’ Open  {input_file}")
+    print(    "  â†’ Replace the value of \"authorization_token\" with your new token")
+    print(   f"  â†’ Press Enter when done, or type 's' to {skip_label}: ", end="", flush=True)
     choice = input().strip().lower()
     if choice == "s":
         return None
@@ -56,12 +57,12 @@ def prompt_new_token(skip_label: str = "skip") -> str | None:
             return token
     except Exception:
         pass
-    print("  ⚠️  Could not read token from input.json")
+    print("  âš ï¸  Could not read token from config/input.json")
     return None
 
 
 def log_event(event: str, **fields: Any) -> None:
-    from logger import log_event as _log
+    from dds.common.logger import log_event as _log
     _log("dds.worker", event, **fields)
 
 
@@ -109,7 +110,7 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       box-shadow: var(--shadow);
       padding: 3.5rem 4rem;
     }}
-    /* ── Title ── */
+    /* â”€â”€ Title â”€â”€ */
     .lesson-title {{
       font-size: 2rem;
       font-weight: 700;
@@ -119,22 +120,22 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       padding-bottom: 1.25rem;
       border-bottom: 3px solid var(--accent);
     }}
-    /* ── Headings ── */
+    /* â”€â”€ Headings â”€â”€ */
     h2 {{ font-size: 1.55rem; font-weight: 700; margin: 2.2rem 0 .75rem; line-height: 1.3; }}
     h3 {{ font-size: 1.25rem; font-weight: 600; margin: 1.8rem 0 .6rem;  line-height: 1.35; }}
     h4, h5, h6 {{ font-size: 1.05rem; font-weight: 600; margin: 1.4rem 0 .5rem; }}
-    /* ── Body text ── */
+    /* â”€â”€ Body text â”€â”€ */
     p {{
       margin: .9rem 0;
       color: var(--text);
     }}
-    /* ── Lists ── */
+    /* â”€â”€ Lists â”€â”€ */
     ul, ol {{
       margin: .75rem 0 .75rem 1.6rem;
     }}
     li {{ margin: .4rem 0; }}
     li::marker {{ color: var(--accent); font-weight: 600; }}
-    /* ── Blockquote ── */
+    /* â”€â”€ Blockquote â”€â”€ */
     blockquote {{
       border-left: 4px solid var(--accent);
       background: var(--accent2);
@@ -151,7 +152,7 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       color: var(--muted);
       font-size: .875rem;
     }}
-    /* ── Callout ── */
+    /* â”€â”€ Callout â”€â”€ */
     .callout {{
       background: var(--accent2);
       border: 1px solid var(--accent);
@@ -163,7 +164,7 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       align-items: flex-start;
     }}
     .callout-icon {{ font-size: 1.2rem; flex-shrink: 0; margin-top: .05rem; }}
-    /* ── Table ── */
+    /* â”€â”€ Table â”€â”€ */
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -181,13 +182,13 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       color: var(--text);
     }}
     tbody tr:nth-child(even) {{ background: #fafafa; }}
-    /* ── Divider ── */
+    /* â”€â”€ Divider â”€â”€ */
     hr {{
       border: none;
       border-top: 2px solid var(--border);
       margin: 2rem 0;
     }}
-    /* ── Images ── */
+    /* â”€â”€ Images â”€â”€ */
     figure {{
       margin: 1.75rem 0;
       text-align: center;
@@ -202,7 +203,7 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       font-size: .85rem;
       margin-top: .5rem;
     }}
-    /* ── Inline ── */
+    /* â”€â”€ Inline â”€â”€ */
     strong, b {{ font-weight: 600; }}
     em, i     {{ font-style: italic; }}
     code {{
@@ -213,7 +214,7 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
     }}
     a {{ color: var(--accent); text-decoration: underline; }}
-    /* ── Checklist ── */
+    /* â”€â”€ Checklist â”€â”€ */
     .checklist {{ list-style: none; margin-left: 0; }}
     .checklist li {{
       display: flex;
@@ -221,13 +222,13 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       gap: .5rem;
     }}
     .checklist li::before {{
-      content: '☐';
+      content: 'â˜';
       color: var(--accent);
       font-size: 1.1rem;
       flex-shrink: 0;
     }}
-    .checklist li.checked::before {{ content: '☑'; }}
-    /* ── Learning Objectives ── */
+    .checklist li.checked::before {{ content: 'â˜‘'; }}
+    /* â”€â”€ Learning Objectives â”€â”€ */
     .learning-objectives {{
       background: var(--accent2);
       border: 1px solid var(--accent);
@@ -250,7 +251,7 @@ def save_html_asset(filepath: Path, title: str, html_content: str) -> None:
       margin: .45rem 0;
       font-size: .97rem;
     }}
-    /* ── Responsive ── */
+    /* â”€â”€ Responsive â”€â”€ */
     @media (max-width: 640px) {{
       article {{ padding: 1.75rem 1.25rem; }}
       .lesson-title {{ font-size: 1.5rem; }}
@@ -330,7 +331,7 @@ def _collect_all_strings(payload: Any, seen: set[int] | None = None) -> list[str
         ):
             results.append(stripped)
     elif isinstance(payload, dict):
-        # Priority fields first — most likely to hold the actual lesson content
+        # Priority fields first â€” most likely to hold the actual lesson content
         priority_keys = (
             "text", "html", "content", "body", "description",
             "summary", "transcript", "lesson", "notes",
@@ -360,11 +361,11 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
     Real structure from the 365 platform API:
     - The payload is a flat JSON *array* of block objects.
     - Each block: {"id": "...", "type": "...", "data": {...}, "tunes": {...}}
-    - "id", "tunes" → metadata only, ignored in output.
-    - "data.words", "data.number", "data.level" → metadata, ignored.
-    - listUnordered / listOrdered → each block is ONE list item (data.content).
+    - "id", "tunes" â†’ metadata only, ignored in output.
+    - "data.words", "data.number", "data.level" â†’ metadata, ignored.
+    - listUnordered / listOrdered â†’ each block is ONE list item (data.content).
       Consecutive same-type blocks are grouped into a single <ul> / <ol>.
-    - templateLearningObjectives → data.items is an array of {content, words}.
+    - templateLearningObjectives â†’ data.items is an array of {content, words}.
     """
     blocks: list[Any] = []
     if isinstance(editorjs_data, dict):
@@ -382,7 +383,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
     html_parts: list[str] = []
     text_parts: list[str] = []
 
-    # ── List-grouping state ───────────────────────────────────────────────────
+    # â”€â”€ List-grouping state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Because each listUnordered/listOrdered block = one item, we accumulate
     # consecutive items and flush them as a single <ul>/<ol>.
     pending_list_tag: str = ""          # "ul" or "ol"
@@ -426,24 +427,24 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
         if btype not in LIST_BLOCK_TYPES:
             flush_list()
 
-        # ── Header ─────────────────────────────────────────────────────────
+        # â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if btype == "header":
             raw = data.get("text", "")
             level = min(max(int(data.get("level", 2)), 1), 6)
             if raw:
                 plain = html_to_plain_text(raw)
                 html_parts.append(f"<h{level}>{raw}</h{level}>")
-                underline = "═" * len(plain) if level <= 2 else "─" * len(plain)
+                underline = "â•" * len(plain) if level <= 2 else "â”€" * len(plain)
                 text_parts.append(f"\n{plain}\n{underline}")
 
-        # ── Paragraph ──────────────────────────────────────────────────────
+        # â”€â”€ Paragraph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "paragraph":
             raw = data.get("text", "")
             if raw:
                 html_parts.append(f"<p>{raw}</p>")
                 text_parts.append(html_to_plain_text(raw))
 
-        # ── Per-item list blocks ────────────────────────────────────────────
+        # â”€â”€ Per-item list blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Each block = exactly ONE list item (data.content holds the item text).
         elif btype in ("listUnordered", "listOrdered"):
             content = data.get("content", "")
@@ -456,10 +457,10 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
             pending_list_tag = tag
             plain_item = html_to_plain_text(content)
             pending_list_html.append(f"  <li>{content}</li>")
-            prefix = f"{len(pending_list_html)}." if tag == "ol" else "•"
+            prefix = f"{len(pending_list_html)}." if tag == "ol" else "â€¢"
             pending_list_text.append(f"  {prefix} {plain_item}")
 
-        # ── Standard Editor.js list block (data.items array) ───────────────
+        # â”€â”€ Standard Editor.js list block (data.items array) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "list":
             items = data.get("items", [])
             style = data.get("style", "unordered")
@@ -477,11 +478,11 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 lines = []
                 for idx, it in enumerate(items, 1):
                     t = html_to_plain_text(_extract(it))
-                    pfx = f"{idx}." if style == "ordered" else "•"
+                    pfx = f"{idx}." if style == "ordered" else "â€¢"
                     lines.append(f"  {pfx} {t}")
                 text_parts.append("\n".join(lines))
 
-        # ── Learning objectives template block ──────────────────────────────
+        # â”€â”€ Learning objectives template block â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "templateLearningObjectives":
             items = data.get("items", [])
             if items:
@@ -496,13 +497,13 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                     "</div>"
                 )
                 obj_lines = ["Learning Objectives"]
-                obj_lines.append("─" * 22)
+                obj_lines.append("â”€" * 22)
                 for it in items:
                     content = it.get("content", "") if isinstance(it, dict) else str(it)
-                    obj_lines.append(f"  • {html_to_plain_text(content)}")
+                    obj_lines.append(f"  â€¢ {html_to_plain_text(content)}")
                 text_parts.append("\n".join(obj_lines))
 
-        # ── Quote ──────────────────────────────────────────────────────────
+        # â”€â”€ Quote â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "quote":
             raw = data.get("text", "")
             caption = data.get("caption", "")
@@ -510,14 +511,14 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 cite_html = f"<cite>{caption}</cite>" if caption else ""
                 html_parts.append(f"<blockquote><p>{raw}</p>{cite_html}</blockquote>")
                 plain = html_to_plain_text(raw)
-                text_parts.append(f'"{plain}"' + (f"\n    — {caption}" if caption else ""))
+                text_parts.append(f'"{plain}"' + (f"\n    â€” {caption}" if caption else ""))
 
-        # ── Delimiter / Divider ────────────────────────────────────────────
+        # â”€â”€ Delimiter / Divider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype in ("delimiter", "divider"):
             html_parts.append("<hr>")
-            text_parts.append("─" * 60)
+            text_parts.append("â”€" * 60)
 
-        # ── Image / Images ────────────────────────────────────────────────
+        # â”€â”€ Image / Images â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype in ("image", "images"):
             file_info = data.get("file") or {}
             url = file_info.get("url", "") or data.get("url", "")
@@ -530,7 +531,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 )
                 text_parts.append(f"[Image{': ' + caption if caption else ''}]")
 
-        # ── File attachment ───────────────────────────────────────────────
+        # â”€â”€ File attachment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "attaches":
             file_info = data.get("file") or {}
             file_url = file_info.get("url", "")
@@ -547,12 +548,12 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                         pass
                 html_parts.append(
                     f'<div class="attachment">'
-                    f'<a href="{file_url}" download>📎 {file_title}{size_str}</a>'
+                    f'<a href="{file_url}" download>ðŸ“Ž {file_title}{size_str}</a>'
                     f'</div>'
                 )
-                text_parts.append(f"📎 {file_title}{size_str}: {file_url}")
+                text_parts.append(f"ðŸ“Ž {file_title}{size_str}: {file_url}")
 
-        # ── Template custom block (recursive) ─────────────────────────────
+        # â”€â”€ Template custom block (recursive) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "templateCustomBlock":
             inner_content = data.get("content")
             if isinstance(inner_content, dict):
@@ -566,7 +567,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                         )
                         text_parts.append(inner_txt)
 
-        # ── Table ──────────────────────────────────────────────────────────
+        # â”€â”€ Table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "table":
             rows = data.get("content", [])
             with_headings = data.get("withHeadings", False)
@@ -582,12 +583,12 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 )
                 html_parts.append(f"<table>{thead}<tbody>{body_html}</tbody></table>")
                 for row in rows:
-                    text_parts.append("  " + " │ ".join(str(c) for c in row))
+                    text_parts.append("  " + " â”‚ ".join(str(c) for c in row))
 
-        # ── Callout / Warning / Info ────────────────────────────────────────
+        # â”€â”€ Callout / Warning / Info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype in ("callOut", "warning", "alert"):
             text = data.get("message", "") or data.get("text", "")
-            icon = data.get("icon", "") or ("⚠️" if btype == "warning" else "💡")
+            icon = data.get("icon", "") or ("âš ï¸" if btype == "warning" else "ðŸ’¡")
             if text:
                 html_parts.append(
                     f'<div class="callout">'
@@ -596,7 +597,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 )
                 text_parts.append(f"{icon}  {html_to_plain_text(text)}")
 
-        # ── Checklist ──────────────────────────────────────────────────────
+        # â”€â”€ Checklist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         elif btype == "checklist":
             items = data.get("items", [])
             if items:
@@ -612,7 +613,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                     mark = "[x]" if checked else "[ ]"
                     text_parts.append(f"  {mark} {html_to_plain_text(str(content))}")
 
-        # ── Generic fallback ────────────────────────────────────────────────
+        # â”€â”€ Generic fallback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         else:
             raw = data.get("text", "") or data.get("message", "")
             # Only use data.content if it's a string (avoid stringifying dicts)
@@ -624,7 +625,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
                 html_parts.append(f"<p>{raw}</p>")
                 text_parts.append(html_to_plain_text(raw))
 
-    # ── Assemble ─────────────────────────────────────────────────────────────
+    # â”€â”€ Assemble â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     combined_html = "\n".join(html_parts)
     # Join text parts: single blank line between paragraphs/items
     combined_text = "\n\n".join(t.strip() for t in text_parts if t.strip())
@@ -636,7 +637,7 @@ def editorjs_to_html_and_text(editorjs_data: Any) -> tuple[str, str] | None:
 def ensure_parsed_html(raw_content: str) -> str:
     """If raw_content looks like JSON (Editor.js blocks), parse it into HTML.
 
-    Returns proper HTML in all cases — either parsed from JSON or the original
+    Returns proper HTML in all cases â€” either parsed from JSON or the original
     string if it's already HTML or plain text.
     """
     stripped = raw_content.strip()
@@ -662,7 +663,7 @@ def fetch_text_lesson_content(
     This is the real endpoint the 365 platform SPA uses for reading/text type
     lessons. It returns Editor.js structured JSON which we convert to HTML+text.
     """
-    # Note: singular 'course' (not 'courses') — this is specific to how
+    # Note: singular 'course' (not 'courses') â€” this is specific to how
     # the 365 platform names this endpoint.
     url = f"{api_base_url.rstrip('/')}/course/text/{asset_id}"
     
@@ -690,7 +691,7 @@ def fetch_text_lesson_content(
                 reason = response.text[:120]
                 
             if response.status_code in (401, 403) or "invalid or expired" in reason.lower():
-                print(f"\n⚠️  [Text API] Token expired or invalid: {reason}")
+                print(f"\nâš ï¸  [Text API] Token expired or invalid: {reason}")
                 new_token = prompt_new_token(skip_label="skip asset")
                 if not new_token:
                     log_event("text_lesson_api_skip", url=url, status_code=response.status_code, reason=reason)
@@ -854,7 +855,7 @@ def download_video_from_stream_url(
                 done = d.get("downloaded_bytes", 0)
                 speed = d.get("speed") or 0
                 eta = d.get("eta")
-                speed_str = f"{speed / 1_048_576:.1f} MiB/s" if speed else "…"
+                speed_str = f"{speed / 1_048_576:.1f} MiB/s" if speed else "â€¦"
                 eta_int = int(eta) if eta else 0
                 eta_str = f"  eta {eta_int // 60:02d}:{eta_int % 60:02d}" if eta else ""
                 progress.update(
@@ -862,11 +863,11 @@ def download_video_from_stream_url(
                     completed=done,
                     total=max(total, 1),
                     visible=True,
-                    description=f"[yellow]      ▶  {speed_str}{eta_str}[/yellow]",
+                    description=f"[yellow]      â–¶  {speed_str}{eta_str}[/yellow]",
                     note="",
                 )
             elif d["status"] == "finished":
-                progress.update(task_id, visible=False, description="[yellow]      ▶[/yellow]")
+                progress.update(task_id, visible=False, description="[yellow]      â–¶[/yellow]")
 
         ydl_opts["quiet"] = True
         ydl_opts["no_warnings"] = True
@@ -935,7 +936,7 @@ def request_course_api(
                 pass
                 
             if response.status_code in (401, 403) or "invalid or expired" in reason.lower():
-                print(f"\n⚠️  [Course API] Token expired or invalid: {reason}")
+                print(f"\nâš ï¸  [Course API] Token expired or invalid: {reason}")
                 new_token = prompt_new_token(skip_label="abort")
                 if not new_token:
                     response.raise_for_status()
@@ -955,7 +956,7 @@ def build_raw_asset_lookup(raw_course: dict) -> dict[int, dict]:
     """Build a mapping of asset_id -> raw JSON dict from the player API response.
 
     This gives access to ALL fields the API returns for each asset, including
-    ones that the Pydantic Asset model doesn't map (content, html, richText…).
+    ones that the Pydantic Asset model doesn't map (content, html, richTextâ€¦).
     """
     lookup: dict[int, dict] = {}
     for section in raw_course.get("sections", []):
@@ -1057,7 +1058,7 @@ def download_course(
         section_count=len(course_data.sections),
     )
 
-    # ── Progress tasks for this course ───────────────────────────────────────
+    # â”€â”€ Progress tasks for this course â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     total_sections = len(course_data.sections)
     total_assets = sum(len(s.assets) for s in course_data.sections)
     section_task = None
@@ -1065,7 +1066,7 @@ def download_course(
     video_task = None
     if progress is not None:
         section_task = progress.add_task(
-            f"[green]  ▸ Sections  [0/{total_sections}][/green]",
+            f"[green]  â–¸ Sections  [0/{total_sections}][/green]",
             total=total_sections,
             note="",
         )
@@ -1075,7 +1076,7 @@ def download_course(
             note="",
         )
         video_task = progress.add_task(
-            "[yellow]      ▶[/yellow]",
+            "[yellow]      â–¶[/yellow]",
             total=1,
             note="",
             visible=False,
@@ -1092,7 +1093,7 @@ def download_course(
         if progress is not None and section_task is not None:
             progress.update(
                 section_task,
-                description=f"[green]  ▸ [{i}/{total_sections}][/green]  {section.name[:46]}",
+                description=f"[green]  â–¸ [{i}/{total_sections}][/green]  {section.name[:46]}",
                 note="",
             )
 
@@ -1127,9 +1128,9 @@ def download_course(
                         reason="file already exists",
                     )
                     if progress is None:
-                        print(f"    ⏭  [{j}] {asset.name}  (video already downloaded)")
+                        print(f"    â­  [{j}] {asset.name}  (video already downloaded)")
                     else:
-                        progress.update(asset_task, note="⏭ skipped")
+                        progress.update(asset_task, note="â­ skipped")
                 else:
                     video_item = cast(VideoItem, asset.video)
                     log_event(
@@ -1291,7 +1292,7 @@ def download_course_resource(course_url: str, authorization_token: str) -> None:
 
 
 if __name__ == "__main__":
-    input_file = Path(__file__).parent / "input.json"
+    input_file = _CONFIG_DIR / "input.json"
     input_data = json.loads(input_file.read_text())
     course_url = input_data.get("course_url")
     authorization_token = input_data.get("authorization_token")
@@ -1306,3 +1307,4 @@ if __name__ == "__main__":
         policy_key=policy_key,
         quality=quality,
     )
+

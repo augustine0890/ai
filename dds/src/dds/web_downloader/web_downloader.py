@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from logger import log_event
+from dds.common.logger import log_event
 from hashlib import sha256
 from importlib.util import find_spec
 from pathlib import Path
@@ -46,7 +46,7 @@ def _log(event: str, **fields) -> None:
     log_event(_MOD, event, **fields)
 
 
-# Extensions we treat as “static assets” worth downloading and rewriting.
+# Extensions we treat as â€œstatic assetsâ€ worth downloading and rewriting.
 # Used in multiple places: HTML attribute rewriting, CSS url(...) rewriting,
 # JS string rewriting, and crawl-time asset detection.
 ASSET_EXTENSIONS = (
@@ -114,8 +114,8 @@ DEFAULT_HEADERS = {
 TIMEOUT = 15  # seconds
 CHUNK_SIZE = 8192  # bytes
 
-# Conservative margins under common OS limits (~255–260 bytes).
-# These protect you from “File name too long” and odd Windows path rules.
+# Conservative margins under common OS limits (~255â€“260 bytes).
+# These protect you from â€œFile name too longâ€ and odd Windows path rules.
 MAX_PATH_LEN = 240
 MAX_SEG_LEN = 120
 
@@ -1693,7 +1693,7 @@ def fetch_binary(
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 0
         if status in (404, 410):
-            # Asset simply doesn't exist on the server — common for stale HTML
+            # Asset simply doesn't exist on the server â€” common for stale HTML
             # references. Log as WARN (not ERROR) to avoid false alarms.
             _log("asset_not_found", url=url, status=status)
         else:
@@ -2117,7 +2117,7 @@ def _fetch_asset_bytes(url: str) -> Optional[tuple[bytes, str]]:
         # Mirror fetch_binary: never forward first-party bearer tokens to CDNs.
         if host and any(k.lower() == "authorization" for k in SESSION.headers.keys()):
             # Heuristic: treat anything not matching the session's primary
-            # cookie domains as external. We strip to be safe — inlining is
+            # cookie domains as external. We strip to be safe â€” inlining is
             # best-effort.
             first_party_cookie_domains = {
                 str(c.domain).lstrip(".").lower()
@@ -2157,7 +2157,7 @@ def _inline_css_text(
     Rewrite url(...) and @import in a CSS string so every reference is either
     a data: URI or a fully inlined @import (recursively).
 
-    css_base_url is the URL the CSS was fetched from — relative url()s are
+    css_base_url is the URL the CSS was fetched from â€” relative url()s are
     resolved against it, not against the page URL, to match browser behavior.
     """
     if depth > 3:
@@ -2184,7 +2184,7 @@ def _inline_css_text(
             # Inline imported CSS directly as text (after recursive inlining).
             try:
                 nested = data.decode("utf-8", errors="replace")
-            except Exception:  # pragma: no cover — defensive
+            except Exception:  # pragma: no cover â€” defensive
                 cache[abs_url] = None
                 return None
             inlined = _inline_css_text(nested, abs_url, cache, depth + 1)
@@ -2303,7 +2303,7 @@ def inline_all_assets(
     if base_tag is not None and base_tag.has_attr("href"):
         base_tag.decompose()
 
-    # 1) <link rel="stylesheet"> → fetch CSS, recursively inline its url()s,
+    # 1) <link rel="stylesheet"> â†’ fetch CSS, recursively inline its url()s,
     #    replace the <link> with a <style> block.
     for link_tag in list(soup.find_all("link")):
         rel = link_tag.get("rel", [])
@@ -2402,7 +2402,7 @@ def inline_all_assets(
             raw = str(tag.get(attr, "")).strip()
             if not raw:
                 continue
-            # Don't inline hrefs that are plain page anchors — only resource-ish attrs.
+            # Don't inline hrefs that are plain page anchors â€” only resource-ish attrs.
             if attr == "href":
                 continue
             uri = _inline_one_url(raw, page_url, cache)
@@ -2421,7 +2421,7 @@ def inline_all_assets(
             if new_style != style_val:
                 tag["style"] = new_style
 
-        # Drop SRI/crossorigin attrs — they don't apply to inlined content
+        # Drop SRI/crossorigin attrs â€” they don't apply to inlined content
         # and can block some browsers from using data: URIs.
         for drop_attr in ("integrity", "crossorigin"):
             if tag.has_attr(drop_attr):
@@ -2429,7 +2429,7 @@ def inline_all_assets(
 
     # 5) <a href> to other crawled pages remains as-is. In SingleFile mode each
     #    page is a standalone document, so we do NOT rewrite inter-page links
-    #    — they stay pointing at the live site. Users navigate via filesystem.
+    #    â€” they stay pointing at the live site. Users navigate via filesystem.
 
     return {"inlined": inlined, "failed": failed, "cache_size": len(cache)}
 
@@ -2563,7 +2563,7 @@ def _extract_next_data_urls(
     Next.js always embeds a ``<script id="__NEXT_DATA__" type="application/json">``
     tag containing the full server-side props for the page, including navigation
     data such as the complete chapter list.  This data is present even when the
-    corresponding sidebar items are inside a *collapsed* accordion — i.e. they
+    corresponding sidebar items are inside a *collapsed* accordion â€” i.e. they
     produce no ``<a>`` tags visible to a normal DOM walk.
 
     Strategy:
@@ -2892,11 +2892,11 @@ def crawl_site(
         if soup is None:
             continue
 
-        # ── Strip paywall overlays / cookie banners ──────────────────────
+        # â”€â”€ Strip paywall overlays / cookie banners â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Some SPAs (e.g. ByteByteGo) SSR the full content but render a
         # CSS overlay + "Unlock" buttons client-side when Firebase auth
         # state is missing from indexedDB.  The content is already in the
-        # DOM — just remove the overlay elements so the page is clean.
+        # DOM â€” just remove the overlay elements so the page is clean.
         if strip_selectors:
             _stripped = 0
             for sel in strip_selectors:
@@ -2932,7 +2932,7 @@ def crawl_site(
             )
             sys.exit(1)
 
-        # ── Next.js __NEXT_DATA__ discovery ───────────────────────────────────
+        # â”€â”€ Next.js __NEXT_DATA__ discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Many Next.js sites (incl. ByteByteGo) hide chapter links inside
         # collapsed accordion sections.  Those links never appear as <a> tags
         # in the rendered DOM.  The __NEXT_DATA__ JSON block always contains
@@ -3273,13 +3273,13 @@ def parse_args() -> argparse.Namespace:
     """
     Parse CLI arguments, with .env file as the default source for every value.
 
-    Priority (highest → lowest):
+    Priority (highest â†’ lowest):
       1. CLI flags (e.g. --url https://...)
       2. .env file variables (loaded via python-dotenv)
       3. Hard-coded defaults below
 
     All config can live entirely in .env so the script runs with just:
-      uv run python web_downloader.py
+      uv run python -m dds.web_downloader
 
     .env variables:
       URL                       Starting URL to crawl
@@ -3303,7 +3303,7 @@ def parse_args() -> argparse.Namespace:
     from dotenv import load_dotenv
     load_dotenv()
 
-    # ── Read env vars ────────────────────────────────────────────────────────
+    # â”€â”€ Read env vars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     env_url = os.getenv("URL", "")
     _start_raw = os.getenv("START_URLS", "")
     env_start_urls = parse_env_token_list(_start_raw)
@@ -3348,19 +3348,19 @@ def parse_args() -> argparse.Namespace:
     env_remove_js = str(os.getenv("REMOVE_JS", "")).strip().lower() == "true"
     env_auth_fail_text = os.getenv("AUTH_FAIL_TEXT") or None
 
-    # HEADER_AUTHORIZATION=Bearer xyz  →  "Authorization: Bearer xyz"
-    # HEADER_X_API_KEY=abc             →  "X-Api-Key: abc"
+    # HEADER_AUTHORIZATION=Bearer xyz  â†’  "Authorization: Bearer xyz"
+    # HEADER_X_API_KEY=abc             â†’  "X-Api-Key: abc"
     env_headers: list[str] = []
     for k, v in os.environ.items():
         if k.startswith("HEADER_") and v:
             header_name = k[7:].replace("_", "-").title()
             env_headers.append(f"{header_name}: {v}")
 
-    # ── Build parser ─────────────────────────────────────────────────────────
+    # â”€â”€ Build parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     p = argparse.ArgumentParser(
         description=(
             "Recursively mirror a website for offline use. "
-            "All options can be set in a .env file — see .env.example."
+            "All options can be set in a .env file â€” see .env.example."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -3923,7 +3923,7 @@ if __name__ == "__main__":
                 page_fetch=False,
             )
 
-        # ── Chapter auto-discovery ────────────────────────────────────────────
+        # â”€â”€ Chapter auto-discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # When DISCOVER_CHAPTERS=true and no SEED_URLS are already provided,
         # load the course root URL and extract chapter links from API responses
         # or the rendered DOM so the user doesn't need to list them manually.
@@ -3980,3 +3980,4 @@ if __name__ == "__main__":
     finally:
         if _pw_stack is not None:
             _pw_stack.stop()
+

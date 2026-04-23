@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """compress_courses.py
 
 Compresses each course folder inside ~/Downloads/365DataScience into a
 separate .zip file sitting alongside the course folder.
 
 Compression strategy:
-  - Already-compressed media (.mp4, .mkv, .webm, …) → STORE (no re-compression;
+  - Already-compressed media (.mp4, .mkv, .webm, â€¦) â†’ STORE (no re-compression;
     avoids bloating files and wastes no CPU time).
-  - Text-based files (.html, .txt, .vtt, .srt, .json, …) → LZMA (best ratio in
+  - Text-based files (.html, .txt, .vtt, .srt, .json, â€¦) â†’ LZMA (best ratio in
     Python's stdlib; typically 70-90% size reduction on text).
-  - Everything else → DEFLATE level 9 (safe default).
+  - Everything else â†’ DEFLATE level 9 (safe default).
 
 Optional video transcoding (--transcode):
   - Re-encodes .mp4 files to H.265 (CRF 26) before zipping.
@@ -18,12 +18,12 @@ Optional video transcoding (--transcode):
   - Typically reduces video size by 40-50% for lecture/screencast content.
 
 Usage:
-    uv run python compress_courses.py                          # compress all courses
-    uv run python compress_courses.py "Intro to Revenue"       # partial name match
-    uv run python compress_courses.py --list                   # list courses + sizes
-    uv run python compress_courses.py --transcode              # transcode videos then zip
-    uv run python compress_courses.py --transcode "SQL"        # transcode + zip matching course
-    uv run python compress_courses.py --transcode --crf 28     # custom CRF value
+    uv run python -m dds.datascience365.compress_courses                          # compress all courses
+    uv run python -m dds.datascience365.compress_courses "Intro to Revenue"       # partial name match
+    uv run python -m dds.datascience365.compress_courses --list                   # list courses + sizes
+    uv run python -m dds.datascience365.compress_courses --transcode              # transcode videos then zip
+    uv run python -m dds.datascience365.compress_courses --transcode "SQL"        # transcode + zip matching course
+    uv run python -m dds.datascience365.compress_courses --transcode --crf 28     # custom CRF value
 """
 
 import subprocess
@@ -32,7 +32,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from logger import log_event
+from dds.common.logger import log_event
 
 # Force UTF-8 output on Windows so emoji/Unicode in print() don't crash.
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -41,7 +41,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 BASE_DIR = Path.home() / "Downloads" / "365DataScience"
 
@@ -69,10 +69,10 @@ DEFAULT_CRF = 26
 # Folders with ARCHIVED_TAG are skipped on next run (already done).
 # Folders with COMPRESSING_TAG were interrupted mid-run and will be resumed.
 ARCHIVED_TAG = "[archived] "
-COMPRESSING_TAG = "[•] "
+COMPRESSING_TAG = "[â€¢] "
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _MODULE = "dds.compress"
 
@@ -124,15 +124,15 @@ def get_ffmpeg() -> str:
 # Each entry: (encoder_name, extra_args_fn(crf) -> list[str], label)
 # Hardware encoders are 5-20x faster than libx265 at comparable quality.
 _ENCODER_CANDIDATES = [
-    # NVIDIA GPU (NVENC) — fastest on most Windows/Linux machines with an NVIDIA card
+    # NVIDIA GPU (NVENC) â€” fastest on most Windows/Linux machines with an NVIDIA card
     ("hevc_nvenc",       lambda crf: ["-rc", "vbr", "-cq", str(crf), "-preset", "p4", "-b:v", "0"], "NVIDIA NVENC"),
-    # Intel Quick Sync — built into Intel CPUs with integrated graphics
+    # Intel Quick Sync â€” built into Intel CPUs with integrated graphics
     ("hevc_qsv",         lambda crf: ["-global_quality", str(crf), "-preset", "faster"],             "Intel QSV"),
-    # AMD AMF — AMD GPUs (Windows/Linux)
+    # AMD AMF â€” AMD GPUs (Windows/Linux)
     ("hevc_amf",         lambda crf: ["-quality", "speed", "-qp_i", str(crf), "-qp_p", str(crf)],   "AMD AMF"),
-    # Apple VideoToolbox — Apple Silicon / macOS
+    # Apple VideoToolbox â€” Apple Silicon / macOS
     ("hevc_videotoolbox", lambda crf: ["-q:v", str(max(0, min(100, (51 - crf) * 2)))],              "Apple VideoToolbox"),
-    # Software fallback — always available, slowest
+    # Software fallback â€” always available, slowest
     ("libx265",          lambda crf: ["-crf", str(crf), "-preset", "ultrafast"],                     "libx265 (software)"),
 ]
 
@@ -185,8 +185,8 @@ def is_hevc(video_path: Path, ffmpeg: str) -> bool:
 
 
 # Return type codes for transcode_video():
-#   (int, int)  → success: (original_bytes, new_bytes)
-#   (None, str) → no-op:   (None, reason)  e.g. "already_hevc" | "wrong_ext"
+#   (int, int)  â†’ success: (original_bytes, new_bytes)
+#   (None, str) â†’ no-op:   (None, reason)  e.g. "already_hevc" | "wrong_ext"
 #                           | "ffmpeg_error" | "timeout" | "zero_output" | "exception"
 
 def transcode_video(
@@ -229,7 +229,7 @@ def transcode_video(
         if result.returncode != 0:
             tmp_path.unlink(missing_ok=True)
             stderr_tail = result.stderr[-400:] if result.stderr else "(no stderr)"
-            print(f"\n    ⚠️  ffmpeg error on {video_path.name}:\n{stderr_tail}")
+            print(f"\n    âš ï¸  ffmpeg error on {video_path.name}:\n{stderr_tail}")
             _write_trace(
                 "transcode_ffmpeg_error",
                 file=str(video_path),
@@ -257,7 +257,7 @@ def transcode_video(
                 tmp=str(tmp_path),
                 error=str(rename_exc),
             )
-            print(f"\n    ⚠️  Rename failed for {video_path.name}: {rename_exc}")
+            print(f"\n    âš ï¸  Rename failed for {video_path.name}: {rename_exc}")
             return None, "rename_error"
 
         return original_size, new_size
@@ -265,16 +265,16 @@ def transcode_video(
     except subprocess.TimeoutExpired:
         tmp_path.unlink(missing_ok=True)
         _write_trace("transcode_timeout", file=str(video_path))
-        print(f"\n    ⚠️  Timeout transcoding {video_path.name} — skipped")
+        print(f"\n    âš ï¸  Timeout transcoding {video_path.name} â€” skipped")
         return None, "timeout"
     except Exception as exc:
         tmp_path.unlink(missing_ok=True)
         _write_trace("transcode_exception", file=str(video_path), error=str(exc), error_type=type(exc).__name__)
-        print(f"\n    ⚠️  Failed transcoding {video_path.name}: {exc}")
+        print(f"\n    âš ï¸  Failed transcoding {video_path.name}: {exc}")
         return None, "exception"
 
 
-# ── Course operations ─────────────────────────────────────────────────────────
+# â”€â”€ Course operations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def transcode_course(
     course_dir: Path,
@@ -316,7 +316,7 @@ def transcode_course(
                 index=i,
                 error="File disappeared before transcode started",
             )
-            print(f"\n    ⚠️  File missing (before transcode): {vf.name}")
+            print(f"\n    âš ï¸  File missing (before transcode): {vf.name}")
             continue
 
         print(f"\r    [{i}/{len(videos)}] {vf.name[:60]:<60}", end="", flush=True)
@@ -331,7 +331,7 @@ def transcode_course(
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
-            print(f"\n    ⚠️  Unexpected error on {vf.name}: {exc}")
+            print(f"\n    âš ï¸  Unexpected error on {vf.name}: {exc}")
             total_before += size_before
             total_after += size_before  # treat as unchanged
             continue
@@ -353,8 +353,8 @@ def transcode_course(
                 saved_bytes=saved,
             )
             print(
-                f"\r    ✅ {vf.name[:50]:<50}"
-                f"  {human_size(orig)} → {human_size(new)}  ({pct:.1f}% smaller)"
+                f"\r    âœ… {vf.name[:50]:<50}"
+                f"  {human_size(orig)} â†’ {human_size(new)}  ({pct:.1f}% smaller)"
             )
         else:
             # Skip or failure: second is the reason string.
@@ -381,13 +381,13 @@ def transcode_course(
                     reason=reason,
                     error="FileNotFoundError: file vanished after transcode attempt",
                 )
-                print(f"\n    ❌  File missing after transcode: {vf.name} (reason: {reason})")
+                print(f"\n    âŒ  File missing after transcode: {vf.name} (reason: {reason})")
                 current_size = 0  # unknown; use 0 to flag discrepancy
 
             total_after += current_size
 
             # Use distinct labels so logs differentiate intentional skips from errors.
-            label = "⏭ " if reason in ("already_hevc", "wrong_ext") else "⚠️ "
+            label = "â­ " if reason in ("already_hevc", "wrong_ext") else "âš ï¸ "
             print(f"\r    {label} {vf.name[:60]:<60} ({reason})")
 
     return total_before, total_after
@@ -425,8 +425,8 @@ def compress_course(course_dir: Path, out_dir: Path, zip_name: str | None = None
     compressed_size = zip_path.stat().st_size
     ratio = (1 - compressed_size / original_size) * 100 if original_size else 0
     print(
-        f"\r    ✅ {human_size(original_size)} → {human_size(compressed_size)}"
-        f"  ({ratio:.1f}% smaller)  →  {zip_path.name}"
+        f"\r    âœ… {human_size(original_size)} â†’ {human_size(compressed_size)}"
+        f"  ({ratio:.1f}% smaller)  â†’  {zip_path.name}"
     )
     return zip_path
 
@@ -449,11 +449,11 @@ def list_all_courses(base_dir: Path) -> list[Path]:
     )
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# â”€â”€ Main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main() -> None:
     if not BASE_DIR.exists():
-        print(f"❌  Base directory not found: {BASE_DIR}")
+        print(f"âŒ  Base directory not found: {BASE_DIR}")
         sys.exit(1)
 
     # Create archives folder for compressed files
@@ -472,7 +472,7 @@ def main() -> None:
             crf = int(args[idx + 1])
             args = args[:idx] + args[idx + 2:]
         except (IndexError, ValueError):
-            print("❌  --crf requires an integer value (e.g. --crf 28)")
+            print("âŒ  --crf requires an integer value (e.g. --crf 28)")
             sys.exit(1)
 
     # Parse optional --batch N
@@ -483,7 +483,7 @@ def main() -> None:
             batch_size = int(args[idx + 1])
             args = args[:idx] + args[idx + 2:]
         except (IndexError, ValueError):
-            print("❌  --batch requires an integer value (e.g. --batch 5)")
+            print("âŒ  --batch requires an integer value (e.g. --batch 5)")
             sys.exit(1)
 
     # --list: show all courses with status then exit
@@ -495,16 +495,16 @@ def main() -> None:
         archived = [d for d in all_dirs if ARCHIVED_TAG in d.name]
         pending = [d for d in all_dirs if ARCHIVED_TAG not in d.name and COMPRESSING_TAG not in d.name]
         interrupted = [d for d in all_dirs if COMPRESSING_TAG in d.name]
-        print(f"Courses in {BASE_DIR}:  {len(pending)} pending  ·  {len(archived)} archived  ·  {len(interrupted)} interrupted\n")
+        print(f"Courses in {BASE_DIR}:  {len(pending)} pending  Â·  {len(archived)} archived  Â·  {len(interrupted)} interrupted\n")
         for c in all_dirs:
             files = [f for f in c.rglob("*") if f.is_file()]
             total_size = sum(f.stat().st_size for f in files)
             if ARCHIVED_TAG in c.name:
-                status = "✅"
+                status = "âœ…"
             elif COMPRESSING_TAG in c.name:
-                status = "⏳"
+                status = "â³"
             else:
-                status = "📁"
+                status = "ðŸ“"
             print(f"  {status} {c.name}  ({len(files)} files, {human_size(total_size)})")
         return
 
@@ -519,7 +519,7 @@ def main() -> None:
         query = " ".join(args).lower()
         courses = [c for c in courses if query in c.name.lower()]
         if not courses:
-            print(f"❌  No course matching '{query}' found.")
+            print(f"âŒ  No course matching '{query}' found.")
             sys.exit(1)
 
     # Apply batch limit
@@ -527,7 +527,7 @@ def main() -> None:
         courses = courses[:batch_size]
         print(f"  Batch mode: processing {len(courses)} course(s) this run.\n")
 
-    # ── Transcode phase ───────────────────────────────────────────────────────
+    # â”€â”€ Transcode phase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     transcode_stats: list[tuple[str, int, int]] = []  # (name, before, after)
 
     if do_transcode:
@@ -543,27 +543,27 @@ def main() -> None:
 
         print()
 
-    # ── Zip phase ─────────────────────────────────────────────────────────────
+    # â”€â”€ Zip phase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     log(f"Starting compression of {len(courses)} course(s)", "compress_batch_start")
-    print("    Strategy: LZMA for text/HTML/VTT  ·  STORE for video/audio  ·  DEFLATE-9 for others\n")
+    print("    Strategy: LZMA for text/HTML/VTT  Â·  STORE for video/audio  Â·  DEFLATE-9 for others\n")
 
     created: list[Path] = []
     total_original = 0
     total_compressed = 0
 
     for course_dir in courses:
-        # If folder already has COMPRESSING_TAG it was interrupted last run — resume it.
+        # If folder already has COMPRESSING_TAG it was interrupted last run â€” resume it.
         if COMPRESSING_TAG in course_dir.name:
             original_name = course_dir.name.replace(COMPRESSING_TAG, "")
             active_dir = course_dir
-            log(f"  ↩  '{original_name}'  (resuming interrupted compression)", "compress_course_resume")
+            log(f"  â†©  '{original_name}'  (resuming interrupted compression)", "compress_course_resume")
         else:
             original_name = course_dir.name
             active_dir = BASE_DIR / f"{COMPRESSING_TAG}{original_name}"
             try:
                 course_dir.rename(active_dir)
             except Exception as exc:
-                log(f"  ⚠️  Cannot rename '{original_name}': {exc}", "compress_rename_error")
+                log(f"  âš ï¸  Cannot rename '{original_name}': {exc}", "compress_rename_error")
                 continue
 
         try:
@@ -585,18 +585,18 @@ def main() -> None:
                 active_dir.rename(BASE_DIR / original_name)
             except Exception:
                 pass
-            log(f"  ⚠️  Failed: {original_name} — {exc}", "compress_course_error")
+            log(f"  âš ï¸  Failed: {original_name} â€” {exc}", "compress_course_error")
 
     overall_ratio = (1 - total_compressed / total_original) * 100 if total_original else 0
     print()
-    log(f"✅  Done! {len(created)} zip file(s) created.", "compress_batch_done")
+    log(f"âœ…  Done! {len(created)} zip file(s) created.", "compress_batch_done")
     log(
-        f"   Total: {human_size(total_original)} → {human_size(total_compressed)}"
+        f"   Total: {human_size(total_original)} â†’ {human_size(total_compressed)}"
         f"  ({overall_ratio:.1f}% overall reduction)",
         "compress_batch_summary",
     )
 
-    # ── Transcode comparison table ────────────────────────────────────────────
+    # â”€â”€ Transcode comparison table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if transcode_stats:
         print()
         log("Video transcoding summary:", "transcode_summary")
@@ -614,7 +614,7 @@ def main() -> None:
             )
         grand_saved = grand_before - grand_after
         grand_pct = (grand_saved / grand_before * 100) if grand_before else 0
-        print(f"  {'─'*45} {'─'*10} {'─'*10} {'─'*10} {'─'*10}")
+        print(f"  {'â”€'*45} {'â”€'*10} {'â”€'*10} {'â”€'*10} {'â”€'*10}")
         print(
             f"  {'TOTAL':<45} {human_size(grand_before):>10} {human_size(grand_after):>10}"
             f" {human_size(grand_saved):>10} {grand_pct:>9.1f}%"
@@ -623,3 +623,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -15,8 +15,11 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup  # pyright: ignore[reportMissingImports]
 
-from download_single_course import editorjs_to_html_and_text, save_html_asset
-from logger import log_event
+from dds.datascience365.download_single_course import (
+    editorjs_to_html_and_text,
+    save_html_asset,
+)
+from dds.common.logger import log_event
 
 _MODULE = "dds.clean"
 

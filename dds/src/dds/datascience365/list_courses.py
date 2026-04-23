@@ -1,14 +1,14 @@
-"""
+﻿"""
 list_courses.py
 
 Fetches the full catalogue of 365 Data Science courses via the API and
-writes the list of course URLs to a JSON file (courses_list.json).
+writes the list of course URLs to a JSON file under config/ (default: courses_list.json).
 
 Usage:
-    uv run python list_courses.py
-    uv run python list_courses.py --financial   # 365financialanalyst.com instead
-    uv run python list_courses.py --free        # only free courses
-    uv run python list_courses.py --out my_list.json
+    uv run python -m dds.datascience365.list_courses
+    uv run python -m dds.datascience365.list_courses --financial   # 365financialanalyst.com instead
+    uv run python -m dds.datascience365.list_courses --free        # only free courses
+    uv run python -m dds.datascience365.list_courses --out my_list.json
 
 Output (courses_list.json):
     {
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import requests
 
-from logger import log_event
+from dds.common.logger import log_event
 
 _MODULE = "dds.list"
 
@@ -43,7 +43,7 @@ def load_token(input_file: Path) -> str:
     data = json.loads(input_file.read_text(encoding="utf-8"))
     token = data.get("authorization_token", "")
     if not token:
-        raise ValueError("authorization_token missing in input.json")
+        raise ValueError("authorization_token missing in config/input.json")
     return token
 
 
@@ -84,7 +84,7 @@ def main() -> None:
     platform = "financialanalyst" if args.financial else "datascience"
     api_base, learn_base = BASE_URLS[platform]
 
-    input_file = Path(__file__).parent / "input.json"
+    input_file = Path(__file__).resolve().parents[3] / "config" / "input.json"
     token = load_token(input_file)
 
     print(f"Fetching course catalogue from {api_base}...")
@@ -108,7 +108,7 @@ def main() -> None:
         "course_urls": urls,
     }
 
-    out_path = Path(__file__).parent / args.out
+    out_path = Path(__file__).resolve().parents[3] / "config" / args.out
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     log_event(_MODULE, "list_saved", path=str(out_path), total=len(urls))
 
@@ -122,3 +122,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

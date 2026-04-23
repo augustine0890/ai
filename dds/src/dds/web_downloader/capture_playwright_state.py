@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from logger import log_event
+from dds.common.logger import log_event
 from playwright.sync_api import Error, sync_playwright
 
 _MOD = "dds.capture_playwright_state"
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--output",
-        default="playwright_state.json",
+        default="output/playwright_state.json",
         help="Where to write storage_state JSON.",
     )
     p.add_argument(

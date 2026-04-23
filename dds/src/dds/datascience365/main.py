@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -9,15 +9,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
-from download_single_course import download_course, download_course_resource
-from clean_downloaded_files import clean_directory
+from dds.datascience365.download_single_course import (
+    download_course,
+    download_course_resource,
+)
+from dds.datascience365.clean_downloaded_files import clean_directory
 
 
 REQUEST_TIMEOUT_SECONDS = 20
 
 
 def log_event(event: str, **fields: Any) -> None:
-    from logger import log_event as _log
+    from dds.common.logger import log_event as _log
     _log("dds.main", event, **fields)
 
 
@@ -29,7 +32,7 @@ def load_input_data(input_file: Path) -> dict[str, Any]:
     missing_fields = [field for field in required_fields if not input_data.get(field)]
     if missing_fields:
         missing_fields_text = ", ".join(missing_fields)
-        raise ValueError(f"Missing required input.json fields: {missing_fields_text}")
+        raise ValueError(f"Missing required config/input.json fields: {missing_fields_text}")
 
     return input_data
 
@@ -106,9 +109,9 @@ def get_course_links_from_input(input_data: dict[str, Any]) -> list[str]:
     return []
 
 
-if __name__ == "__main__":
+def main() -> None:
     # Main flow: validate config -> discover URLs -> process each course independently.
-    input_file = Path(__file__).parent / "input.json"
+    input_file = Path(__file__).resolve().parents[3] / "config" / "input.json"
     input_data = load_input_data(input_file)
     log_event("config_loaded", input_file=str(input_file))
 
@@ -134,8 +137,8 @@ if __name__ == "__main__":
 
     if not all_course_link:
         raise RuntimeError(
-            "No course links found from courses page and no fallback found in input.json. "
-            "Provide course_url or course_urls in input.json."
+            "No course links found from courses page and no fallback found in config/input.json. "
+            "Provide course_url or course_urls in config/input.json."
         )
 
     authorization_token = cast(str, input_data["authorization_token"])
@@ -145,8 +148,8 @@ if __name__ == "__main__":
 
     console = Console()
     console.print(Panel.fit(
-        f"[bold cyan]dds[/bold cyan]  ·  365 Course Downloader"
-        f"  ·  [bold]{len(all_course_link)}[/bold] course(s)  ·  [bold]{quality}[/bold]",
+        f"[bold cyan]dds[/bold cyan]  Â·  365 Course Downloader"
+        f"  Â·  [bold]{len(all_course_link)}[/bold] course(s)  Â·  [bold]{quality}[/bold]",
         border_style="cyan",
     ))
 
@@ -162,7 +165,7 @@ if __name__ == "__main__":
     ) as progress:
         total = len(all_course_link)
         course_task = progress.add_task(
-            f"[bold cyan]● Courses  [0/{total}][/bold cyan]",
+            f"[bold cyan]â— Courses  [0/{total}][/bold cyan]",
             total=total,
             note="",
         )
@@ -171,7 +174,7 @@ if __name__ == "__main__":
             course_slug = course_url.strip("/").split("/").pop()
             progress.update(
                 course_task,
-                description=f"[bold cyan]● Courses  [{index}/{total}][/bold cyan]",
+                description=f"[bold cyan]â— Courses  [{index}/{total}][/bold cyan]",
                 note=course_slug,
             )
             try:
@@ -199,7 +202,7 @@ if __name__ == "__main__":
                 log_event(
                     "course_error", index=index, course_url=course_url, error=str(exc)
                 )
-                progress.console.print(f"[red]⚠️  Failed:[/red] {course_url}\n   {exc}")
+                progress.console.print(f"[red]âš ï¸  Failed:[/red] {course_url}\n   {exc}")
             finally:
                 progress.advance(course_task)
 
@@ -212,3 +215,9 @@ if __name__ == "__main__":
             log_event("cleanup_done", cleaned_files=cleaned)
         except Exception as exc:
             log_event("cleanup_error", error=str(exc))
+
+
+if __name__ == "__main__":
+    main()
+
+

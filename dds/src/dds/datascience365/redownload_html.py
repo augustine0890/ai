@@ -1,19 +1,19 @@
-"""
+﻿"""
 redownload_html.py
 
 Re-downloads only the HTML and TXT text-lesson content for courses listed in
-input.json, overwriting existing files. Videos are never touched.
+config/input.json, overwriting existing files. Videos are never touched.
 
 Usage:
-    uv run python redownload_html.py
+    uv run python -m dds.datascience365.redownload_html
 """
 
 import json
 from pathlib import Path
 from typing import cast
 
-from clean_downloaded_files import clean_directory
-from download_single_course import (
+from dds.datascience365.clean_downloaded_files import clean_directory
+from dds.datascience365.download_single_course import (
     ensure_parsed_html,
     fetch_text_lesson_content,
     get_api_base_url,
@@ -28,7 +28,7 @@ from download_single_course import (
 
 
 def log(msg: str) -> None:
-    from logger import log_event
+    from dds.common.logger import log_event
     log_event("dds.html", msg)
 
 
@@ -36,10 +36,10 @@ def _download_html_for_course(course_url: str, authorization_token: str) -> None
     course_slug = course_url.strip("/").split("/").pop()
     api_base_url = get_api_base_url(course_url)
 
-    print(f"\n{'─' * 60}")
+    print(f"\n{'â”€' * 60}")
     print(f"  Course : {course_slug}")
     print(f"  API    : {api_base_url}")
-    print(f"{'─' * 60}")
+    print(f"{'â”€' * 60}")
 
     course_data, _ = request_course_api(course_slug, authorization_token, api_base_url)
     base_dir = (
@@ -61,7 +61,7 @@ def _download_html_for_course(course_url: str, authorization_token: str) -> None
             )
             token = get_auth_token(authorization_token)
 
-            # ── Step A: inline text from player payload ──────────────────────
+            # â”€â”€ Step A: inline text from player payload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             html_text = asset.text
             if not html_text and asset.lecture_id:
                 html_text = request_lecture_html(
@@ -76,7 +76,7 @@ def _download_html_for_course(course_url: str, authorization_token: str) -> None
                 save_html_asset(html_path, asset.name, ensure_parsed_html(html_text))
                 total_saved += 1
 
-            # ── Step B: /course/text/{asset_id} (non-video assets only) ─────
+            # â”€â”€ Step B: /course/text/{asset_id} (non-video assets only) â”€â”€â”€â”€â”€
             has_video = bool(asset.video) and not isinstance(asset.video, bool)
             if not has_video:
                 result = fetch_text_lesson_content(
@@ -92,30 +92,30 @@ def _download_html_for_course(course_url: str, authorization_token: str) -> None
                     txt_out.parent.mkdir(parents=True, exist_ok=True)
                     txt_out.write_text(content_txt, encoding="utf-8")
                     total_saved += 1
-                    print(f"    ✓ [{j}] {asset.name}")
+                    print(f"    âœ“ [{j}] {asset.name}")
                 else:
                     total_skipped += 1
-                    print(f"    · [{j}] {asset.name}  (no text content)")
+                    print(f"    Â· [{j}] {asset.name}  (no text content)")
 
-    print(f"\n  ✅ {course_data.info.name}: {total_saved} saved, {total_skipped} skipped")
+    print(f"\n  âœ… {course_data.info.name}: {total_saved} saved, {total_skipped} skipped")
 
 
 def main() -> None:
-    input_file = Path(__file__).parent / "input.json"
+    input_file = Path(__file__).resolve().parents[3] / "config" / "input.json"
     data = json.loads(input_file.read_text(encoding="utf-8"))
 
     authorization_token = data.get("authorization_token", "")
     if not authorization_token:
-        raise ValueError("authorization_token missing in input.json")
+        raise ValueError("authorization_token missing in config/input.json")
     update_auth_token(authorization_token)
 
-    # Collect course URLs — same priority as main.py
+    # Collect course URLs â€” same priority as main.py
     course_urls: list[str] = data.get("course_urls", [])
     single = data.get("course_url", "")
     if not course_urls and single:
         course_urls = [single]
     if not course_urls:
-        raise ValueError("No course_url or course_urls found in input.json")
+        raise ValueError("No course_url or course_urls found in config/input.json")
 
     print(f"Re-downloading HTML/TXT for {len(course_urls)} course(s)...")
 
@@ -124,14 +124,14 @@ def main() -> None:
         try:
             _download_html_for_course(course_url, authorization_token)
         except Exception as exc:
-            print(f"  ⚠️  Failed: {exc}")
+            print(f"  âš ï¸  Failed: {exc}")
             # Give user a chance to refresh token and retry once
             new_token = prompt_new_token(skip_label="skip this course")
             if new_token:
                 try:
                     _download_html_for_course(course_url, new_token)
                 except Exception as exc2:
-                    print(f"  ⚠️  Still failed after token refresh: {exc2}")
+                    print(f"  âš ï¸  Still failed after token refresh: {exc2}")
 
     # Post-pass: clean up any raw JSON still embedded in files
     downloads_dir = Path.home() / "Downloads" / "365DataScience"
@@ -140,8 +140,9 @@ def main() -> None:
         cleaned = clean_directory(downloads_dir)
         print(f"Cleaned {cleaned} files with embedded raw JSON.")
 
-    print("\n✅ Done.")
+    print("\nâœ… Done.")
 
 
 if __name__ == "__main__":
     main()
+

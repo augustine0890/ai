@@ -39,7 +39,7 @@ TRIM_THRESHOLD: int = 110   # only rewrite the file once we exceed this
 # ── Session state ──────────────────────────────────────────────────────────────
 _session_id: str = uuid.uuid4().hex[:8]
 _seq: int = 0
-_trace_path: Path = Path(__file__).parent / "trace.jsonl"
+_trace_path: Path = Path(__file__).resolve().parents[3] / "output" / "trace.jsonl"
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
@@ -108,6 +108,7 @@ def log_event(module: str, event: str, **fields: Any) -> None:
 
     # ── JSONL file ─────────────────────────────────────────────────────────────
     try:
+        _trace_path.parent.mkdir(parents=True, exist_ok=True)
         with _trace_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
         _trim_if_needed()

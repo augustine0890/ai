@@ -1,6 +1,6 @@
 # Site Profiles for `web_downloader.py`
 
-Each `.env.*` file in this directory is a **complete, ready-to-use** configuration for one target site/mode. The main script always reads `dds/.env` - these files are templates you copy from.
+Each `.env.*` file in this directory is a **complete, ready-to-use** configuration for one target site/mode. The downloader still reads `dds/.env` - these files are templates you copy from.
 
 ## Available profiles
 
@@ -8,7 +8,7 @@ Each `.env.*` file in this directory is a **complete, ready-to-use** configurati
 |---|---|---|
 | [.env.bytebytego-courses](.env.bytebytego-courses) | `bytebytego.com/courses/<slug>/` (paid content) | Cookie string from DevTools |
 | [.env.bytebytego-guides](.env.bytebytego-guides) | `bytebytego.com/guides/` (public articles) | None |
-| [.env.wqu](.env.wqu) | `learn.wqu.edu/my-courses/.../tasks/...` (paid lessons) | `PLAYWRIGHT_STORAGE_STATE` (captured via `capture_playwright_state.py`) |
+| [.env.wqu](.env.wqu) | `learn.wqu.edu/my-courses/.../tasks/...` (paid lessons) | `PLAYWRIGHT_STORAGE_STATE` (captured via `python -m dds.web_downloader.capture_playwright_state`) |
 
 ## How to use
 
@@ -21,7 +21,7 @@ Each `.env.*` file in this directory is a **complete, ready-to-use** configurati
 3. **Edit `.env`** and fill in the credentials / URLs indicated at the top of the file.
 4. **Run the downloader:**
    ```bash
-   uv run python web_downloader.py
+   uv run python -m dds.web_downloader
    ```
 
 ## Adding a new profile

@@ -14,11 +14,11 @@ This session reached a working solution for both the downloader strategy and the
 
 ## 2. Files That Matter
 
-- `dds/web_downloader.py`
+- `dds/src/dds/web_downloader/web_downloader.py`
 - `dds/.env`
 - `dds/.env.example`
-- `dds/web_downloader.md`
-- `dds/trace.jsonl`
+- `dds/docs/web_downloader.md`
+- `dds/output/trace.jsonl`
 
 ---
 
@@ -79,7 +79,7 @@ What this means for config:
   - `FOLLOW_LINKS=false`
   - `START_URLS=[...]`
 - Use browser state auth:
-  - `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json`
+  - `PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json`
 - Use Playwright for final page capture:
   - `PLAYWRIGHT=true`
   - `PLAYWRIGHT_PAGE_FETCH=true`
@@ -168,8 +168,8 @@ The authenticated `requests` path was the stable one for protected chapter HTML.
 ### WQU auth guidance
 
 1. Do not try to reconstruct WQU login from Application-tab tracking cookies.
-2. Use `capture_playwright_state.py` and log in manually in the opened browser.
-3. `playwright_state.json` is the primary WQU auth mechanism.
+2. Use `python -m dds.web_downloader.capture_playwright_state` and log in manually in the opened browser.
+3. `output/playwright_state.json` is the primary WQU auth mechanism.
 4. The saved Playwright storage state may contain mostly analytics cookies in
    the plain cookie list, but the Playwright browser context can still open the
    authenticated lesson correctly.
@@ -367,20 +367,20 @@ START_URLS=["https://learn.wqu.edu/my-courses/courses/financial-markets/modules/
 FOLLOW_LINKS=false
 PLAYWRIGHT=true
 PLAYWRIGHT_PAGE_FETCH=true
-PLAYWRIGHT_STORAGE_STATE=./playwright_state.json
+PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json
 REMOVE_JS=true
 WAIT_FOR=main, article
 THREADS=1
-DESTINATION=~/Downloads/wqu
+DESTINATION=./output/wqu
 ```
 
 Capture browser state first:
 
 ```bash
 cd dds
-uv run python capture_playwright_state.py \
+uv run python -m dds.web_downloader.capture_playwright_state \
   --url https://learn.wqu.edu/my-courses/ \
-  --output playwright_state.json
+  --output output/playwright_state.json
 ```
 
 Notes:
@@ -477,7 +477,7 @@ Behavior:
   CDN assets (mirrors `fetch_binary` safety).
 - `REMOVE_JS=true` still works: scripts are dropped instead of inlined.
 - Unresolvable assets (404, HTML redirects) are left in place — the page
-  degrades gracefully. Per-page telemetry goes to `trace.jsonl` as
+  degrades gracefully. Per-page telemetry goes to `output/trace.jsonl` as
   `single_file_inlined inlined=N failed=N unique_assets=N`.
 
 Key code added to `web_downloader.py`:
@@ -575,10 +575,10 @@ The user flow is:
 ```bash
 cd dds
 cp profiles/.env.wqu .env
-uv run python web_downloader.py
+uv run python -m dds.web_downloader
 ```
 
-That means `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json` still works
+That means `PLAYWRIGHT_STORAGE_STATE=./output/playwright_state.json` still works
 normally. It is read from the copied `.env`, then used by the existing
 Playwright/session setup code.
 
@@ -590,7 +590,7 @@ The profile set now follows these rules:
 - each `dds/profiles/.env.*` file is complete for one supported site or mode
 - each profile starts with enough header comments to explain auth, required
   edits, and expected output
-- real secrets stay only in `dds/.env` and `dds/playwright_state.json`, both of
+- real secrets stay only in `dds/.env` and `dds/output/playwright_state.json`, both of
   which remain ignored
 
 ### Directory shape
@@ -599,22 +599,101 @@ The profile set now follows these rules:
 dds/
 |- .env
 |- .env.example
+|- docs/
+|  |- datascience365.md
+|  |- session_context.md
+|  `- web_downloader.md
+|- output/
+|  |- bytebytego_com/
+|  |- playwright_state.json
+|  `- trace.jsonl
 |- profiles/
 |  |- README.md
 |  |- .env.bytebytego-courses
 |  |- .env.bytebytego-guides
 |  `- .env.wqu
-`- web_downloader.py
+`- src/
 ```
 
 ### Where planning content should live
 
 Use the files like this going forward:
 
-- `session_context.md`: stable background, goals, design rationale, decisions,
+- `docs/session_context.md`: stable background, goals, design rationale, decisions,
   and lessons learned
 - `plan.md`: the current actionable checklist, verification steps, rollback,
   and status only
 
 That split keeps long-lived context in one place without turning every new plan
 into a large design document.
+
+---
+
+## 15. Folder Cleanup and Module Layout
+
+The project now uses a `src/` package layout and separates source, docs,
+config, and runtime output.
+
+### Current layout
+
+```text
+dds/
+|- .env
+|- .env.example
+|- README.md
+|- config/
+|  |- courses_list.json
+|  |- input.example.json
+|  `- input.json
+|- docs/
+|  |- datascience365.md
+|  |- session_context.md
+|  `- web_downloader.md
+|- output/
+|  |- bytebytego_com/
+|  |- playwright_state.json
+|  `- trace.jsonl
+|- profiles/
+|- src/
+|  `- dds/
+|     |- common/logger.py
+|     |- datascience365/
+|     `- web_downloader/
+`- tests/
+```
+
+### File move map
+
+- `logger.py` -> `src/dds/common/logger.py`
+- `main.py` -> `src/dds/datascience365/main.py`
+- `list_courses.py` -> `src/dds/datascience365/list_courses.py`
+- `download_single_course.py` -> `src/dds/datascience365/download_single_course.py`
+- `redownload_html.py` -> `src/dds/datascience365/redownload_html.py`
+- `clean_downloaded_files.py` -> `src/dds/datascience365/clean_downloaded_files.py`
+- `compress_courses.py` -> `src/dds/datascience365/compress_courses.py`
+- `course_model.py` -> `src/dds/datascience365/course_model.py`
+- `video_model.py` -> `src/dds/datascience365/video_model.py`
+- `web_downloader.py` -> `src/dds/web_downloader/web_downloader.py`
+- `capture_playwright_state.py` -> `src/dds/web_downloader/capture_playwright_state.py`
+- `input.example.json` -> `config/input.example.json`
+- `input.json` -> `config/input.json`
+- `courses_list.json` -> `config/courses_list.json`
+- `WEB_DOWNLOADER.md` -> `docs/web_downloader.md`
+- `session_context.md` -> `docs/session_context.md`
+- `trace.jsonl` -> `output/trace.jsonl`
+- `bytebytego_com/` -> `output/bytebytego_com/`
+
+### Invocation pattern
+
+- Web downloader: `uv run python -m dds.web_downloader`
+- Capture storage state: `uv run python -m dds.web_downloader.capture_playwright_state`
+- 365 downloader: `uv run python -m dds.datascience365.main`
+
+### Path conventions
+
+- shared JSON config lives under `config/`
+- generated runtime artifacts live under `output/`
+- committed docs live under `docs/`
+- the active env file remains `dds/.env`
+
+
