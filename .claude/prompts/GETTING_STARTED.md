@@ -291,10 +291,10 @@ what was planned vs. what actually happened.
 
 ### When to call Claude during execution
 
-Use the **execution prompt** (see Step 5 below) to read the plan and start
-implementing:
+Once `plan.md` exists, you do not need a separate execution prompt file.
+Just ask Claude to read the plan and execute it step by step.
 
-- Ask Claude to execute step-by-step based on the plan.
+- Ask Claude to execute the plan as written.
 - If a step fails: ask Claude to debug. Do not modify the plan - it
   records intent.
 - If scope shifts materially: stop, ask Claude to create a new plan in a
@@ -371,20 +371,19 @@ experiments/churn-v3/
 
 ---
 
-## Step 5: Use the execution prompt to implement
+## Step 5: Execute the plan directly
 
-Once you have `plan.md`, use the **execution prompt** to start work:
+Once you have `plan.md`, ask Claude to execute it directly:
 
 ```text
-I have experiments/churn-v3/plan-baseline.md with detailed steps.
-Please read it and implement step-by-step, asking me for clarification
-if needed.
-
-[paste the prompt from .claude/prompts/execute_plan.md]
+Please read experiments/churn-v3/plan-baseline.md and execute it step by
+step. Follow the plan order, run the verification for each completed
+step, update only the Status cells, and pause if anything is blocked or
+ambiguous.
 ```
 
-The execution prompt ensures Claude reads the plan in full, understands
-the scope and verification criteria, and executes each step methodically.
+This is enough. A separate execution prompt usually adds token cost
+without adding much value once the plan itself is clear.
 
 ---
 
@@ -394,7 +393,7 @@ the scope and verification criteria, and executes each step methodically.
 |---|---|---|
 | Starting a new project | `session_context.md` | Paste CREATE prompt from `session_context.md` |
 | New task ready to build | `plan-<task>.md` | Paste `plan.md` prompt |
-| Ready to implement steps | - | Paste `execute_plan.md` prompt |
+| Ready to implement steps | `plan-<task>.md` | Ask Claude to read and execute the plan |
 | Completed a step | `plan-<task>.md` | Flip Status to `Done` (no paste needed) |
 | Step failed; need help | - | Ask Claude to debug (do not modify plan) |
 | Discovered a constraint | `session_context.md` | Paste UPDATE prompt from `session_context.md` |
