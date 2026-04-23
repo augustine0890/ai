@@ -49,18 +49,19 @@ That's it. Everything is configured via `.env` — no CLI args needed. All value
 
 1. [Quick Start](#quick-start)
 2. [Configuration via .env file](#configuration-via-env-file)
-3. [Architecture](#architecture)
-4. [How to get cookies and headers](#how-to-get-cookies-and-headers)
+3. [Site profiles (quickstart templates)](#site-profiles-quickstart-templates)
+4. [Architecture](#architecture)
+5. [How to get cookies and headers](#how-to-get-cookies-and-headers)
    - [Getting cookies](#getting-cookie)
    - [Getting a Bearer token (Authorization header)](#getting-header_authorization-bearer-token)
-5. [Crawl scoping: URL_PREFIX](#crawl-scoping-url_prefix)
-6. [Chapter auto-discovery](#chapter-auto-discovery)
-7. [Seed URLs — sites with no `<a href>` chapter links](#seed-urls--sites-with-no-a-href-chapter-links)
-8. [Example .env files](#example-env-files)
-9. [ByteByteGo / Next.js SPA — Playwright mode](#bytebytego--nextjs-spa--playwright-mode)
-10. [All CLI flags](#all-cli-flags)
-11. [Output structure](#output-structure)
-12. [Limitations](#limitations)
+6. [Crawl scoping: URL_PREFIX](#crawl-scoping-url_prefix)
+7. [Chapter auto-discovery](#chapter-auto-discovery)
+8. [Seed URLs - sites with no `<a href>` chapter links](#seed-urls---sites-with-no-a-href-chapter-links)
+9. [Example .env files](#example-env-files)
+10. [ByteByteGo / Next.js SPA - Playwright mode](#bytebytego--nextjs-spa---playwright-mode)
+11. [All CLI flags](#all-cli-flags)
+12. [Output structure](#output-structure)
+13. [Limitations](#limitations)
 
 ---
 
@@ -179,6 +180,46 @@ Use the auth method that matches the site:
 | learn.wqu.edu | No, not in the recommended flow | Run `capture_playwright_state.py`, log in manually in the opened browser, save `playwright_state.json`, then use `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json` |
 
 For WQU, the login step is outside `.env`: you authenticate in the real browser window opened by `capture_playwright_state.py`.
+
+---
+
+## Site profiles (quickstart templates)
+
+Three ready-to-use `.env` templates live in `dds/profiles/`. Each is complete for its target site - copy one to `.env`, fill in credentials, run.
+
+| Profile file | Target site | Auth |
+|---|---|---|
+| `profiles/.env.bytebytego-courses` | `bytebytego.com/courses/...` | Cookie string (DevTools) |
+| `profiles/.env.bytebytego-guides` | `bytebytego.com/guides/...` | None (public) |
+| `profiles/.env.wqu` | `learn.wqu.edu/my-courses/...` | `PLAYWRIGHT_STORAGE_STATE` |
+
+### Typical flow
+
+```bash
+cd dds
+cp profiles/.env.bytebytego-courses .env    # or another profile
+# edit .env - paste COOKIE, set URL
+uv run python web_downloader.py
+```
+
+### Switching sites
+
+Just copy a different profile over `.env`:
+
+```bash
+cp profiles/.env.wqu .env
+# capture browser state first for WQU
+uv run python capture_playwright_state.py \
+  --url https://learn.wqu.edu/my-courses/ \
+  --output playwright_state.json
+uv run python web_downloader.py
+```
+
+Already-downloaded files are skipped automatically - you can crawl multiple sites into the same filesystem without re-downloading.
+
+### Adding a new site
+
+Create `dds/profiles/.env.<site-slug>` using an existing profile as a starting point. See `dds/profiles/README.md` for the conventions.
 
 ---
 

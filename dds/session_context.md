@@ -519,3 +519,102 @@ For single-archive workflows, `SINGLE_FILE=true` produces one self-contained
 `.html` per page with all CSS/JS/images/fonts inlined as `data:` URIs. It
 runs on the same fetch/auth pipeline and is an alternative output mode, not a
 replacement for sidecar mode.
+
+---
+
+## 13. Site Profile Files (implemented via plan.md Option A)
+
+Introduced `dds/profiles/` with one complete `.env` template per supported site:
+
+- `profiles/.env.bytebytego-courses` - paid courses, cookie auth, discovery on
+- `profiles/.env.bytebytego-guides` - public guides, no auth, normal link-crawl
+- `profiles/.env.wqu` - WQU lessons, storage_state auth, REMOVE_JS=true
+
+`.env.example` is now a minimal generic template. `web_downloader.py` unchanged -
+profile-switching is purely a copy-paste operation:
+
+    cp profiles/.env.wqu .env
+
+This resolves the prior concern that `.env` had to document all three sites at
+once, which made the correct setup for each site unclear.
+
+See `dds/profiles/README.md` for the full workflow.
+
+---
+
+## 14. Site Profile Templates and Plan Storage
+
+This section absorbs the durable background that used to live at the top of
+`dds/plan.md`. The intent is to keep future `plan.md` files short and
+execution-focused.
+
+### Why profiles exist
+
+`web_downloader.py` is one unified downloader. The site differences are mostly
+configuration, not separate code paths:
+
+- ByteByteGo courses: cookie auth, `DISCOVER_CHAPTERS=true`,
+  `PLAYWRIGHT_PAGE_FETCH=false`, keep JS
+- ByteByteGo guides: mostly public, `FOLLOW_LINKS=true`, normal link crawl
+- WQU lessons: `PLAYWRIGHT_STORAGE_STATE`, `PLAYWRIGHT_PAGE_FETCH=true`,
+  `REMOVE_JS=true`
+
+Putting all of that into one giant `.env.example` made the correct setup hard to
+see. Splitting it into committed profile templates makes the workflow explicit.
+
+### Runtime behavior remains unchanged
+
+No loader behavior changed:
+
+- `web_downloader.py` still calls `load_dotenv()` and reads `dds/.env`
+- there is still no `--env-file`
+- profile files under `dds/profiles/` are templates, not runtime inputs
+
+The user flow is:
+
+```bash
+cd dds
+cp profiles/.env.wqu .env
+uv run python web_downloader.py
+```
+
+That means `PLAYWRIGHT_STORAGE_STATE=./playwright_state.json` still works
+normally. It is read from the copied `.env`, then used by the existing
+Playwright/session setup code.
+
+### Profile design
+
+The profile set now follows these rules:
+
+- `dds/.env.example` stays minimal and generic
+- each `dds/profiles/.env.*` file is complete for one supported site or mode
+- each profile starts with enough header comments to explain auth, required
+  edits, and expected output
+- real secrets stay only in `dds/.env` and `dds/playwright_state.json`, both of
+  which remain ignored
+
+### Directory shape
+
+```text
+dds/
+|- .env
+|- .env.example
+|- profiles/
+|  |- README.md
+|  |- .env.bytebytego-courses
+|  |- .env.bytebytego-guides
+|  `- .env.wqu
+`- web_downloader.py
+```
+
+### Where planning content should live
+
+Use the files like this going forward:
+
+- `session_context.md`: stable background, goals, design rationale, decisions,
+  and lessons learned
+- `plan.md`: the current actionable checklist, verification steps, rollback,
+  and status only
+
+That split keeps long-lived context in one place without turning every new plan
+into a large design document.
